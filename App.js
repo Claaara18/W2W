@@ -30,6 +30,7 @@ export default function App() {
     <SafeAreaProvider>
       <NavigationContainer>
       <Tab.Navigator
+        initialRouteName="HOME"
         screenOptions={{
           headerShown: false,
           tabBarStyle: {
@@ -52,18 +53,12 @@ export default function App() {
         }}
       >
         <Tab.Screen
-          name="HOME"
-          component={HomeScreen}
+          name="COLLECTION"
+          component={CollectionScreen}
           options={{
             tabBarIcon: ({ color, size }) => (
-              <Ionicons name="home" size={size} color={color} />
+              <Ionicons name="heart" size={size} color={color} />
             ),
-            tabBarLabelStyle: {
-              fontSize: 7,
-              fontWeight: '600',
-              letterSpacing: 0,
-              marginTop: 2,
-            },
           }}
         />
         <Tab.Screen
@@ -76,12 +71,18 @@ export default function App() {
           }}
         />
         <Tab.Screen
-          name="COLLECTION"
-          component={CollectionScreen}
+          name="HOME"
+          component={HomeScreen}
           options={{
             tabBarIcon: ({ color, size }) => (
-              <Ionicons name="heart" size={size} color={color} />
+              <Ionicons name="home" size={size} color={color} />
             ),
+            tabBarLabelStyle: {
+              fontSize: 7,
+              fontWeight: '600',
+              letterSpacing: 0,
+              marginTop: 2,
+            },
           }}
         />
         <Tab.Screen

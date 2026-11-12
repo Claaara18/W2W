@@ -9,10 +9,10 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 
-// ── (Optional) add remove.bg API key for more reliable results ──
-const REMOVE_BG_API_KEY = '';
+// ⚠️  TEST ONLY — EXPO_PUBLIC_ vars are bundled into the app binary.
+// For production, move this call to a Firebase Cloud Function.
 
 // ── Theme ────────────────────────────────────────────────────
 const BEIGE  = '#F5EFE6';
@@ -63,7 +63,7 @@ const SPACE = 'https://briaai-rmbg-1-4.hf.space';
 
 const saveBase64 = async (b64) => {
   const dest = `${FileSystem.documentDirectory}item_${Date.now()}.png`;
-  await FileSystem.writeAsStringAsync(dest, b64, { encoding: FileSystem.EncodingType.Base64 });
+  await FileSystem.writeAsStringAsync(dest, b64, { encoding: 'base64' });
   return dest;
 };
 
@@ -99,10 +99,7 @@ const handleGradioOutput = async (output) => {
   return b64 ? saveBase64(b64) : null;
 };
 
-const removeBackground = async (uri) => {
-  if (REMOVE_BG_API_KEY) return removeWithRemoveBg(uri);
-  return removeWithHuggingFace(uri);
-};
+const removeBackground = async (uri) => removeWithRemoveBg(uri);
 
 // Free — HuggingFace RMBG-1.4 (supports both Gradio 3 and Gradio 4 API)
 const removeWithHuggingFace = async (uri) => {
@@ -165,22 +162,57 @@ const removeWithHuggingFace = async (uri) => {
   }
 };
 
-// remove.bg (free API key at remove.bg/api, 50 credits/month)
+// remove.bg — base64 JSON（RN 0.76+ 不再支援 FormData { uri } 物件）
 const removeWithRemoveBg = async (uri) => {
-  try {
-    const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
-    const res = await fetch('https://api.remove.bg/v1.0/removebg', {
-      method: 'POST',
-      headers: { 'X-Api-Key': REMOVE_BG_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image_file_b64: base64, size: 'auto', format: 'png' }),
-    });
-    if (!res.ok) return null;
-    const json = await res.json();
-    const b64 = json?.data?.result_b64;
-    return b64 ? saveBase64(b64) : null;
-  } catch {
-    return null;
+  const apiKey = process.env.EXPO_PUBLIC_REMOVE_BG_API_KEY;
+  if (!apiKey) throw new Error('REMOVE_BG_API_KEY 未設定（請檢查 .env.local）');
+
+  console.log('[remove.bg] 開始去背，uri:', uri);
+
+  const base64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
+  console.log('[remove.bg] 圖片轉 base64 完成，length:', base64.length);
+
+  console.log('[remove.bg] 送出 POST /v1.0/removebg');
+  const res = await fetch('https://api.remove.bg/v1.0/removebg', {
+    method: 'POST',
+    headers: {
+      'X-Api-Key': apiKey,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      image_file_b64: base64,
+      size: 'auto',
+      format: 'png',
+      type: 'product',
+      crop: 'true',
+    }),
+  });
+
+  console.log('[remove.bg] HTTP status:', res.status);
+
+  if (!res.ok) {
+    let errBody = '';
+    try { errBody = await res.text(); } catch {}
+    console.error('[remove.bg] 錯誤 body:', errBody);
+    const msg = {
+      400: `請求格式錯誤：${errBody}`,
+      401: 'API Key 無效或未設定',
+      402: '帳戶額度不足（本月免費額度已用完）',
+      403: '沒有權限',
+      429: '呼叫頻率超限，請稍後再試',
+      500: `remove.bg 伺服器錯誤：${errBody}`,
+    };
+    throw new Error(msg[res.status] ?? `remove.bg 回傳 ${res.status}：${errBody}`);
   }
+
+  console.log('[remove.bg] 成功，讀取 binary...');
+  const ab = await res.arrayBuffer();
+  console.log('[remove.bg] 收到', ab.byteLength, 'bytes');
+
+  const b64 = abToBase64(ab);
+  const dest = await saveBase64(b64);
+  console.log('[remove.bg] 去背 PNG 儲存至：', dest);
+  return dest;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -265,20 +297,25 @@ export default function ClosetScreen() {
 
   const processAndAdd = async (catId, uris) => {
     const baseCount = items[catId]?.length ?? 0;
+    const errors = [];
+    let added = 0;
     for (let i = 0; i < uris.length; i++) {
-      const src = uris[i];
-      const ts  = Date.now() + i;
-      let uri = src;
+      const ts = Date.now() + i;
       try {
-        const dest = `${FileSystem.documentDirectory}w2w_${catId}_${ts}.jpg`;
-        await FileSystem.copyAsync({ from: src, to: dest });
-        uri = dest;
-      } catch {}
-      addItem(catId, {
-        id: `${catId}_${ts}`,
-        uri,
-        label: `look ${baseCount + i + 1}`,
-      });
+        const processedUri = await removeBackground(uris[i]);
+        addItem(catId, {
+          id: `${catId}_${ts}`,
+          uri: processedUri,
+          label: `look ${baseCount + added + 1}`,
+        });
+        added++;
+      } catch (err) {
+        console.error(`[processAndAdd] 第 ${i + 1} 張失敗：`, err.message);
+        errors.push(`第 ${i + 1} 張：${err.message}`);
+      }
+    }
+    if (errors.length > 0) {
+      Alert.alert('去背失敗', errors.join('\n\n'));
     }
   };
 
@@ -310,7 +347,6 @@ export default function ClosetScreen() {
         {/* Header */}
         <View style={styles.listHeader}>
           <View>
-            <Text style={styles.chapter}>Chapter . III</Text>
             <Text style={styles.pageTitle}>Closet</Text>
           </View>
         </View>

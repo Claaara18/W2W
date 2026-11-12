@@ -154,7 +154,6 @@ export default function CollectionScreen() {
       <SafeAreaView style={styles.safe} edges={['top']}>
         <View style={styles.listHeader}>
           <View>
-            <Text style={styles.chapter}>Chapter . II</Text>
             <Text style={styles.pageTitle}>Collection</Text>
           </View>
           <View style={styles.totalBox}>

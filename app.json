@@ -39,7 +39,8 @@
         {
           "locationWhenInUsePermission": "Allow W2W to access your location for weather information."
         }
-      ]
+      ],
+      "expo-status-bar"
     ]
   }
 }

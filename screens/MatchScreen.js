@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import {
   View, Text, Image, ScrollView, TouchableOpacity,
   StyleSheet, Dimensions, Platform, PanResponder, Animated, Alert,
@@ -6,6 +6,9 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
+import { Accelerometer } from 'expo-sensors';
+import * as Haptics from 'expo-haptics';
 import { useWardrobe } from '../context/WardrobeContext';
 import { useCollection, STYLE_CATEGORIES } from '../context/CollectionContext';
 import { useCalendar } from '../context/CalendarContext';
@@ -16,11 +19,164 @@ const MUTED  = '#9E8C7A';
 const SERIF  = Platform.OS === 'ios' ? 'Georgia' : 'serif';
 const MONO   = 'JetBrainsMono_400Regular';
 const { width } = Dimensions.get('window');
-
 const { height: SCREEN_H } = Dimensions.get('window');
+
 const CANVAS_W = width - 32;
 const CANVAS_H = SCREEN_H * 0.37;
 const THUMB_W  = (width - 48) / 3;
+
+const SHAKE_THRESHOLD = 2.6;
+const SHAKE_COOLDOWN  = 1500;
+
+// Category display sizes — w×h box the image sits inside
+const ITEM_SIZES = {
+  tshirts: { w: 90,  h: 82  },
+  jackets: { w: 96,  h: 84  },
+  skirts:  { w: 88,  h: 88  },
+  pants:   { w: 78,  h: 110 },
+  dresses: { w: 84,  h: 118 },
+};
+const DEFAULT_SZ = { w: 82, h: 82 };
+
+// ── Layout constants ───────────────────────────────────────────
+// Safe zone: top 18% reserved for date label, bottom 12% for star button.
+// Left column (top + bottom) is centered at 30% of canvas width.
+// Right column (jacket) is centered at 68% of canvas width.
+const SAFE_TOP_FRAC    = 0.18;
+const SAFE_BOTTOM_FRAC = 0.88;
+const LEFT_COL_CX_FRAC = 0.30;
+const RIGHT_COL_CX_FRAC = 0.68;
+const VGAP = 10;
+
+const safeZone = () => ({
+  top:     CANVAS_H * SAFE_TOP_FRAC,
+  bottom:  CANVAS_H * SAFE_BOTTOM_FRAC,
+  usableH: CANVAS_H * (SAFE_BOTTOM_FRAC - SAFE_TOP_FRAC),
+});
+
+// ── Smart initial positions based on category ──────────────────
+const smartPos = (categoryId, existingItems) => {
+  const sz  = ITEM_SIZES[categoryId] ?? DEFAULT_SZ;
+  const { top: safeTop, usableH } = safeZone();
+
+  // Column center → item top-left
+  const leftCX  = CANVAS_W * LEFT_COL_CX_FRAC;
+  const rightCX = CANVAS_W * RIGHT_COL_CX_FRAC;
+
+  // Estimate total left-column height for vertical centering
+  const tSz         = ITEM_SIZES.tshirts;
+  const existingTop = existingItems.find(i => i.categoryId === 'tshirts');
+  const existingBot = existingItems.find(i => ['pants','skirts'].includes(i.categoryId));
+  const willHaveTop = existingTop != null || categoryId === 'tshirts';
+  const willHaveBot = existingBot != null || ['pants','skirts'].includes(categoryId);
+  const botH        = existingBot
+    ? (ITEM_SIZES[existingBot.categoryId]?.h ?? sz.h)
+    : (['pants','skirts'].includes(categoryId) ? sz.h : ITEM_SIZES.skirts.h);
+
+  const leftColH = (willHaveTop && willHaveBot)
+    ? tSz.h + VGAP + botH
+    : tSz.h;
+
+  // Vertically center the left column inside safe zone
+  const startY = Math.round(safeTop + Math.max(0, (usableH - leftColH) / 2));
+
+  const sameCount = existingItems.filter(ci => ci.categoryId === categoryId).length;
+  const stagger   = sameCount * 18;
+
+  const clamp = (x, y) => ({
+    x: Math.max(4, Math.min(x, CANVAS_W - sz.w - 4)),
+    y: Math.max(safeTop, Math.min(y, CANVAS_H * SAFE_BOTTOM_FRAC - sz.h - 4)),
+  });
+
+  switch (categoryId) {
+    case 'tshirts':
+      return clamp(
+        Math.round(leftCX - sz.w / 2) + stagger,
+        startY + stagger,
+      );
+
+    case 'pants':
+    case 'skirts': {
+      const refY = existingTop != null
+        ? existingTop.initY + tSz.h + VGAP
+        : startY + tSz.h + VGAP;
+      return clamp(Math.round(leftCX - sz.w / 2) + stagger, refY + stagger);
+    }
+
+    case 'jackets': {
+      const jSz = ITEM_SIZES.jackets;
+      const { usableH: uH, top: sT } = safeZone();
+      const jY  = Math.round(sT + Math.max(0, (uH - jSz.h) / 2));
+      return clamp(Math.round(rightCX - jSz.w / 2) + stagger, jY + stagger);
+    }
+
+    case 'dresses': {
+      const dSz = ITEM_SIZES.dresses;
+      const dY  = Math.round(safeTop + Math.max(0, (usableH - dSz.h) / 2));
+      return clamp(Math.round((CANVAS_W - dSz.w) / 2) + stagger, dY + stagger);
+    }
+
+    default:
+      return clamp(Math.round(leftCX - sz.w / 2) + stagger, startY + stagger);
+  }
+};
+
+// ── Outfit layout for shake-to-match ──────────────────────────
+const layoutOutfit = (outfitItems, canvasStateRef, ts) => {
+  const tops    = outfitItems.filter(i => i.categoryId === 'tshirts');
+  const bottoms = outfitItems.filter(i => ['pants','skirts'].includes(i.categoryId));
+  const jackets = outfitItems.filter(i => i.categoryId === 'jackets');
+  const dresses = outfitItems.filter(i => i.categoryId === 'dresses');
+
+  const { top: safeTop, usableH } = safeZone();
+  const leftCX  = CANVAS_W * LEFT_COL_CX_FRAC;
+  const rightCX = CANVAS_W * RIGHT_COL_CX_FRAC;
+
+  const placements = [];
+
+  if (dresses.length > 0) {
+    const dSz = ITEM_SIZES.dresses;
+    const dY  = Math.round(safeTop + Math.max(0, (usableH - dSz.h) / 2));
+    placements.push({ item: dresses[0], x: Math.round((CANVAS_W - dSz.w) / 2), y: dY, sz: dSz });
+    jackets.forEach((j, i) => {
+      const jSz = ITEM_SIZES.jackets;
+      const jY  = Math.round(safeTop + Math.max(0, (usableH - jSz.h) / 2));
+      placements.push({ item: j, x: Math.round(rightCX - jSz.w / 2) + i * 18, y: jY, sz: jSz });
+    });
+
+  } else if (tops.length > 0) {
+    const tSz = ITEM_SIZES.tshirts;
+    const bSz = bottoms.length > 0 ? (ITEM_SIZES[bottoms[0].categoryId] ?? DEFAULT_SZ) : null;
+
+    // Vertical centering based on full left-column height
+    const leftColH = bSz ? tSz.h + VGAP + bSz.h : tSz.h;
+    const startY   = Math.round(safeTop + Math.max(0, (usableH - leftColH) / 2));
+    const leftX    = Math.round(leftCX - tSz.w / 2);
+
+    placements.push({ item: tops[0], x: leftX, y: startY, sz: tSz });
+
+    if (bSz) {
+      placements.push({
+        item: bottoms[0],
+        x: Math.round(leftCX - bSz.w / 2),
+        y: startY + tSz.h + VGAP,
+        sz: bSz,
+      });
+    }
+
+    jackets.forEach((j, i) => {
+      const jSz = ITEM_SIZES.jackets;
+      const jY  = Math.round(safeTop + Math.max(0, (usableH - jSz.h) / 2));
+      placements.push({ item: j, x: Math.round(rightCX - jSz.w / 2) + i * 18, y: jY, sz: jSz });
+    });
+  }
+
+  return placements.map(({ item, x, y, sz }, i) => {
+    const id = `shake_${item.id}_${ts}_${i}`;
+    canvasStateRef[id] = { panX: 0, panY: 0, scale: 1 };
+    return { ...item, id, initX: x, initY: y, sz };
+  });
+};
 
 const CATEGORIES = [
   { name: 'T-shirts', id: 'tshirts' },
@@ -28,18 +184,6 @@ const CATEGORIES = [
   { name: 'Skirts',   id: 'skirts'  },
   { name: 'Pants',    id: 'pants'   },
   { name: 'Dresses',  id: 'dresses' },
-];
-
-// Scatter positions as fraction of canvas dimensions
-const SCATTER = [
-  { x: 0.08, y: 0.12 },
-  { x: 0.55, y: 0.06 },
-  { x: 0.30, y: 0.44 },
-  { x: 0.58, y: 0.40 },
-  { x: 0.10, y: 0.62 },
-  { x: 0.54, y: 0.62 },
-  { x: 0.38, y: 0.18 },
-  { x: 0.68, y: 0.22 },
 ];
 
 const chunk = (arr, n) =>
@@ -56,8 +200,8 @@ const DAY_COL = ['S','M','T','W','T','F','S'];
 
 function DatePickerModal({ visible, onClose, onSave }) {
   const now = new Date();
-  const [year, setYear]   = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth());
+  const [year, setYear]     = useState(now.getFullYear());
+  const [month, setMonth]   = useState(now.getMonth());
   const [selDay, setSelDay] = useState(null);
 
   const firstDay    = new Date(year, month, 1).getDay();
@@ -91,11 +235,9 @@ function DatePickerModal({ visible, onClose, onSave }) {
                   <Ionicons name="chevron-forward" size={20} color={DARK} />
                 </TouchableOpacity>
               </View>
-
               <View style={dp.hdrRow}>
                 {DAY_COL.map((d, i) => <Text key={i} style={dp.hdrTxt}>{d}</Text>)}
               </View>
-
               <View style={dp.grid}>
                 {cells.map((day, i) => {
                   const sel = day && day === selDay;
@@ -110,7 +252,6 @@ function DatePickerModal({ visible, onClose, onSave }) {
                   );
                 })}
               </View>
-
               <TouchableOpacity style={[dp.saveBtn, !selDay && { opacity: 0.35 }]}
                 onPress={handleSave} disabled={!selDay}>
                 <Text style={dp.saveTxt}>儲存到這天</Text>
@@ -124,30 +265,30 @@ function DatePickerModal({ visible, onClose, onSave }) {
 }
 
 const dp = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  sheet: { backgroundColor: '#F5EFE6', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 44 },
-  navRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
+  overlay:  { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  sheet:    { backgroundColor: '#F5EFE6', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 44 },
+  navRow:   { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
   monthTxt: { fontFamily: SERIF, fontSize: 18, fontWeight: '700', color: DARK },
-  hdrRow: { flexDirection: 'row', marginBottom: 6 },
-  hdrTxt: { flex: 1, textAlign: 'center', fontFamily: MONO, fontSize: 10, color: MUTED },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 20 },
-  cell: { width: `${100/7}%`, aspectRatio: 1, justifyContent: 'center', alignItems: 'center', borderRadius: 8, marginBottom: 2 },
-  cellSel: { backgroundColor: DARK },
-  cellToday: { borderWidth: 1.5, borderColor: DARK },
-  cellTxt: { fontFamily: MONO, fontSize: 13, color: DARK },
-  cellTxtSel: { color: '#F5EFE6' },
+  hdrRow:   { flexDirection: 'row', marginBottom: 6 },
+  hdrTxt:   { flex: 1, textAlign: 'center', fontFamily: MONO, fontSize: 10, color: MUTED },
+  grid:     { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 20 },
+  cell:     { width: `${100/7}%`, aspectRatio: 1, justifyContent: 'center', alignItems: 'center', borderRadius: 8, marginBottom: 2 },
+  cellSel:  { backgroundColor: DARK },
+  cellToday:{ borderWidth: 1.5, borderColor: DARK },
+  cellTxt:  { fontFamily: MONO, fontSize: 13, color: DARK },
+  cellTxtSel:   { color: '#F5EFE6' },
   cellTxtToday: { fontWeight: '700' },
-  saveBtn: { backgroundColor: DARK, borderRadius: 12, paddingVertical: 14, alignItems: 'center' },
-  saveTxt: { color: '#F5EFE6', fontSize: 15, fontWeight: '700' },
+  saveBtn:  { backgroundColor: DARK, borderRadius: 12, paddingVertical: 14, alignItems: 'center' },
+  saveTxt:  { color: '#F5EFE6', fontSize: 15, fontWeight: '700' },
 });
 
-// ── Draggable item on the moodboard ──────────────────────────
+// ── Draggable item ─────────────────────────────────────────────
 function DraggableItem({ item, onRemove, onRelease }) {
-  const pan       = useRef(new Animated.ValueXY()).current;
-  const scale     = useRef(new Animated.Value(1)).current;
-  const lastScale = useRef(1);
-  const lastDist  = useRef(null);
-  // stable ref so the panResponder closure always calls the latest onRelease
+  const sz         = item.sz ?? DEFAULT_SZ;
+  const pan        = useRef(new Animated.ValueXY()).current;
+  const scale      = useRef(new Animated.Value(1)).current;
+  const lastScale  = useRef(1);
+  const lastDist   = useRef(null);
   const releaseRef = useRef(onRelease);
   releaseRef.current = onRelease;
 
@@ -202,23 +343,25 @@ function DraggableItem({ item, onRemove, onRelease }) {
       <TouchableOpacity style={styles.removeBtn} onPress={onRemove} hitSlop={8}>
         <Ionicons name="close-circle" size={20} color="#AAAAAA" />
       </TouchableOpacity>
-      <View style={styles.itemBox}>
-        {item.uri ? (
-          <Image source={{ uri: item.uri }} style={styles.itemImage} resizeMode="contain" />
-        ) : (
-          <Text style={[styles.itemLabel, { color: MUTED }]}>{item.label}</Text>
+      <View style={{ width: sz.w, height: sz.h }}>
+        {item.uri && (
+          <Image source={{ uri: item.uri }} style={{ width: sz.w, height: sz.h }} resizeMode="contain" />
         )}
       </View>
     </Animated.View>
   );
 }
 
-// ── Main screen ───────────────────────────────────────────────
+// ── Main screen ────────────────────────────────────────────────
 export default function MatchScreen() {
   const [category, setCategory]       = useState('tshirts');
   const [canvasItems, setCanvasItems] = useState([]);
-  const counter     = useRef(0);
-  const canvasState = useRef({}); // { [id]: { panX, panY, scale } }
+  const counter      = useRef(0);
+  const canvasState  = useRef({});
+  const lastOutfit   = useRef([]);
+  const isShaking    = useRef(false);
+  const canvasOpacity = useRef(new Animated.Value(1)).current;
+
   const { items } = useWardrobe();
   const { looks, addLook } = useCollection();
   const { saveEntry } = useCalendar();
@@ -228,6 +371,101 @@ export default function MatchScreen() {
   const now = new Date();
   const moodDateStr = `${WEEKDAYS_SHORT[now.getDay()]} · ${MONTHS_SHORT[now.getMonth()]} ${now.getDate()}`;
 
+  // ── Random outfit generator ───────────────────────────────
+  const generateRandomOutfit = () => {
+    const tshirts = items.tshirts ?? [];
+    const pants   = items.pants   ?? [];
+    const skirts  = items.skirts  ?? [];
+    const dresses = items.dresses ?? [];
+    const jackets = items.jackets ?? [];
+
+    const pick = (arr) => arr.length ? arr[Math.floor(Math.random() * arr.length)] : null;
+    const allBottoms = [
+      ...pants.map(i  => ({ ...i, categoryId: 'pants'  })),
+      ...skirts.map(i => ({ ...i, categoryId: 'skirts' })),
+    ];
+
+    const hasSufficientClothes =
+      (tshirts.length > 0 && allBottoms.length > 0) || dresses.length > 0;
+    if (!hasSufficientClothes) return [];
+
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const candidate = [];
+      const useDress  = dresses.length > 0 &&
+        (tshirts.length === 0 || allBottoms.length === 0 || Math.random() < 0.25);
+
+      if (useDress) {
+        const d = pick(dresses);
+        if (d) candidate.push({ ...d, categoryId: 'dresses' });
+      } else {
+        const top    = pick(tshirts);
+        const bottom = pick(allBottoms);
+        if (top)    candidate.push({ ...top, categoryId: 'tshirts' });
+        if (bottom) candidate.push({ ...bottom });
+        if (jackets.length > 0 && Math.random() < 0.28) {
+          const j = pick(jackets);
+          if (j) candidate.push({ ...j, categoryId: 'jackets' });
+        }
+      }
+
+      if (candidate.length === 0) continue;
+      const candIds = candidate.map(i => i.id).sort().join(',');
+      const lastIds = lastOutfit.current.slice().sort().join(',');
+      if (candIds !== lastIds || attempt >= 4) {
+        lastOutfit.current = candidate.map(i => i.id);
+        return candidate;
+      }
+    }
+    return [];
+  };
+
+  // ── Shake to match ────────────────────────────────────────
+  const shakeToMatch = useCallback(() => {
+    if (isShaking.current) return;
+    isShaking.current = true;
+    setTimeout(() => { isShaking.current = false; }, SHAKE_COOLDOWN);
+
+    try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); } catch {}
+
+    Animated.timing(canvasOpacity, {
+      toValue: 0.25, duration: 180, useNativeDriver: true,
+    }).start(() => {
+      const newOutfit = generateRandomOutfit();
+
+      if (newOutfit.length === 0) {
+        Animated.timing(canvasOpacity, { toValue: 1, duration: 220, useNativeDriver: true }).start();
+        Alert.alert('衣櫥太空了', '先到 Closet 新增衣服，才能搖出搭配');
+        return;
+      }
+
+      // Clear canvas state and compute smart layout
+      Object.keys(canvasState.current).forEach(k => delete canvasState.current[k]);
+      const ts   = Date.now();
+      const laid = layoutOutfit(newOutfit, canvasState.current, ts);
+      counter.current = laid.length;
+      setCanvasItems(laid);
+
+      Animated.timing(canvasOpacity, {
+        toValue: 1, duration: 280, useNativeDriver: true,
+      }).start();
+    });
+  }, [items]);
+
+  // ── Accelerometer ─────────────────────────────────────────
+  useFocusEffect(
+    useCallback(() => {
+      let sub = null;
+      try {
+        Accelerometer.setUpdateInterval(100);
+        sub = Accelerometer.addListener(({ x, y, z }) => {
+          if (Math.sqrt(x*x + y*y + z*z) > SHAKE_THRESHOLD) shakeToMatch();
+        });
+      } catch {}
+      return () => { try { sub?.remove(); } catch {} };
+    }, [shakeToMatch])
+  );
+
+  // ── Canvas helpers ────────────────────────────────────────
   const saveToCalendar = (dateStr) => {
     if (canvasItems.length === 0) {
       Alert.alert('搭配板是空的', '先加入衣服再儲存到日曆');
@@ -241,14 +479,15 @@ export default function MatchScreen() {
     Alert.alert('已儲存', `穿搭已記錄到 ${dateStr} ✓`);
   };
 
-  const addToCanvas = (item) => {
-    const idx   = counter.current % SCATTER.length;
-    const initX = SCATTER[idx].x * CANVAS_W;
-    const initY = SCATTER[idx].y * CANVAS_H;
+  const addToCanvas = (item, categoryId) => {
     counter.current += 1;
     const id = `${item.id}_${counter.current}`;
+    const sz = ITEM_SIZES[categoryId] ?? DEFAULT_SZ;
     canvasState.current[id] = { panX: 0, panY: 0, scale: 1 };
-    setCanvasItems(prev => [...prev, { ...item, id, initX, initY }]);
+    setCanvasItems(prev => {
+      const pos = smartPos(categoryId, prev);
+      return [...prev, { ...item, id, categoryId, sz, initX: pos.x, initY: pos.y }];
+    });
   };
 
   const removeFromCanvas = (id) => {
@@ -267,7 +506,6 @@ export default function MatchScreen() {
       Alert.alert('搭配板是空的', '先加入衣服再收藏');
       return;
     }
-    // Snapshot: absolute canvas coordinates + user scale
     const snapshot = canvasItems.map(ci => {
       const s = canvasState.current[ci.id] ?? { panX: 0, panY: 0, scale: 1 };
       return { id: ci.id, uri: ci.uri, label: ci.label, x: ci.initX + s.panX, y: ci.initY + s.panY, scale: s.scale };
@@ -300,12 +538,14 @@ export default function MatchScreen() {
 
       {/* ── Header ── */}
       <View style={styles.header}>
-        <View style={{ width: 72 }} />
+        <View style={{ width: 80 }} />
         <View style={styles.headerCenter}>
-          <Text style={styles.chapter}>Chapter . I</Text>
           <Text style={styles.title}>Match</Text>
         </View>
         <View style={styles.headerRight}>
+          <TouchableOpacity onPress={shakeToMatch} hitSlop={8}>
+            <Ionicons name="dice-outline" size={22} color={DARK} />
+          </TouchableOpacity>
           <TouchableOpacity onPress={() => setCalPickerVisible(true)} hitSlop={8}>
             <Ionicons name="calendar-outline" size={20} color={DARK} />
           </TouchableOpacity>
@@ -315,8 +555,8 @@ export default function MatchScreen() {
         </View>
       </View>
 
-      {/* ── Moodboard — fixed height ── */}
-      <View style={styles.canvas}>
+      {/* ── Moodboard ── */}
+      <Animated.View style={[styles.canvas, { opacity: canvasOpacity }]}>
         <Text style={styles.moodLabel}>{moodDateStr}</Text>
         {canvasItems.map(item => (
           <DraggableItem
@@ -329,33 +569,34 @@ export default function MatchScreen() {
         {canvasItems.length === 0 && (
           <View style={styles.emptyCanvas}>
             <Text style={styles.emptyCanvasText}>點選下方衣物加入搭配</Text>
+            <Text style={styles.emptyCanvasSub}>搖晃手機或點骰子隨機穿搭</Text>
           </View>
         )}
         <TouchableOpacity style={styles.starBtn} activeOpacity={0.75} onPress={saveLook}>
           <Ionicons name="star-outline" size={20} color={MUTED} />
         </TouchableOpacity>
-      </View>
+      </Animated.View>
 
       {/* ── Category tabs ── */}
       <View style={styles.tabsContainer}>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.tabsWrap}
-      >
-        {CATEGORIES.map(cat => (
-          <TouchableOpacity
-            key={cat.id}
-            style={styles.tabBtn}
-            onPress={() => setCategory(cat.id)}
-          >
-            <Text style={[styles.tabText, category === cat.id && styles.tabTextOn]}>
-              {cat.name}
-            </Text>
-            {category === cat.id && <View style={styles.tabLine} />}
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.tabsWrap}
+        >
+          {CATEGORIES.map(cat => (
+            <TouchableOpacity
+              key={cat.id}
+              style={styles.tabBtn}
+              onPress={() => setCategory(cat.id)}
+            >
+              <Text style={[styles.tabText, category === cat.id && styles.tabTextOn]}>
+                {cat.name}
+              </Text>
+              {category === cat.id && <View style={styles.tabLine} />}
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
       </View>
 
       {/* ── Clothing grid ── */}
@@ -363,9 +604,7 @@ export default function MatchScreen() {
         <View style={styles.gridWrap}>
           {currentItems.length === 0 ? (
             <View style={styles.emptyGrid}>
-              <Text style={styles.emptyGridText}>
-                先到 Closet 新增衣服
-              </Text>
+              <Text style={styles.emptyGridText}>先到 Closet 新增衣服</Text>
             </View>
           ) : (
             chunk(currentItems, 3).map((row, ri) => (
@@ -374,11 +613,10 @@ export default function MatchScreen() {
                   <TouchableOpacity
                     key={item.id}
                     style={styles.thumbCell}
-                    onPress={() => addToCanvas(item)}
+                    onPress={() => addToCanvas(item, category)}
                     activeOpacity={0.75}
                   >
                     <Image source={{ uri: item.uri }} style={styles.thumbImage} resizeMode="contain" />
-                    <Text style={styles.thumbLabel}>{item.label}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -399,7 +637,6 @@ export default function MatchScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: BEIGE },
 
-  // Header
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -407,32 +644,17 @@ const styles = StyleSheet.create({
     paddingTop: 6,
     paddingBottom: 10,
   },
-  headerCenter: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  chapter: {
-    fontFamily: MONO,
-    fontSize: 10,
-    color: MUTED,
-    letterSpacing: 0.8,
-  },
-  title: {
-    fontFamily: SERIF,
-    fontSize: 28,
-    fontWeight: '700',
-    color: DARK,
-    lineHeight: 32,
-  },
+  headerCenter: { flex: 1, alignItems: 'center' },
+  chapter: { fontFamily: MONO, fontSize: 10, color: MUTED, letterSpacing: 0.8 },
+  title:   { fontFamily: SERIF, fontSize: 28, fontWeight: '700', color: DARK, lineHeight: 32 },
   headerRight: {
-    width: 72,
+    width: 80,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-end',
     gap: 10,
   },
 
-  // Moodboard canvas
   canvas: {
     width: CANVAS_W,
     height: CANVAS_H,
@@ -457,134 +679,43 @@ const styles = StyleSheet.create({
     left: 16,
   },
   emptyCanvas: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
+    flex: 1, justifyContent: 'center', alignItems: 'center', gap: 6,
   },
   emptyCanvasText: {
-    fontFamily: MONO,
-    fontSize: 11,
-    color: '#CCBFB5',
-    letterSpacing: 0.5,
+    fontFamily: MONO, fontSize: 11, color: '#CCBFB5', letterSpacing: 0.5,
+  },
+  emptyCanvasSub: {
+    fontFamily: MONO, fontSize: 10, color: '#D8CFC7', letterSpacing: 0.3,
   },
 
-  // Draggable item
-  canvasItem: {
-    position: 'absolute',
-    zIndex: 10,
-  },
-  removeBtn: {
-    position: 'absolute',
-    top: -8,
-    right: -8,
-    zIndex: 20,
-    backgroundColor: 'rgba(255,255,255,0.9)',
-    borderRadius: 11,
-  },
-  itemBox: {
-    width: 82,
-    height: 82,
-    borderRadius: 14,
-    backgroundColor: '#F0EAE0',
-    justifyContent: 'center',
-    alignItems: 'center',
-    overflow: 'hidden',
-  },
-  itemImage: {
-    width: 82,
-    height: 82,
-  },
-  itemLabel: {
-    fontFamily: MONO,
-    fontSize: 9,
-    letterSpacing: 0.5,
+  canvasItem: { position: 'absolute', zIndex: 10 },
+  removeBtn:  {
+    position: 'absolute', top: -8, right: -8, zIndex: 20,
+    backgroundColor: 'rgba(255,255,255,0.9)', borderRadius: 11,
   },
 
-  // Category tabs
-  tabsContainer: {
-    height: 44,
-    overflow: 'hidden',
-  },
-  tabsWrap: {
-    paddingHorizontal: 16,
-    paddingTop: 4,
-    paddingBottom: 2,
-    gap: 4,
-  },
-  tabBtn: {
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    alignItems: 'center',
-  },
-  tabText: {
-    fontFamily: MONO,
-    fontSize: 13,
-    color: MUTED,
-  },
-  tabTextOn: {
-    color: DARK,
-    fontWeight: '600',
-  },
-  tabLine: {
-    height: 1.5,
-    width: '100%',
-    backgroundColor: DARK,
-    marginTop: 3,
-  },
+  tabsContainer: { height: 44, overflow: 'hidden' },
+  tabsWrap: { paddingHorizontal: 16, paddingTop: 4, paddingBottom: 2, gap: 4 },
+  tabBtn:   { paddingHorizontal: 10, paddingVertical: 8, alignItems: 'center' },
+  tabText:  { fontFamily: MONO, fontSize: 13, color: MUTED },
+  tabTextOn:{ color: DARK, fontWeight: '600' },
+  tabLine:  { height: 1.5, width: '100%', backgroundColor: DARK, marginTop: 3 },
 
-  // Clothing grid
-  gridWrap: {
-    paddingHorizontal: 16,
-    paddingTop: 4,
-  },
-  gridRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 6,
-  },
+  gridWrap: { paddingHorizontal: 16, paddingTop: 4 },
+  gridRow:  { flexDirection: 'row', gap: 8, marginBottom: 6 },
   thumbCell: {
-    width: THUMB_W,
-    height: 88,
-    borderRadius: 14,
-    backgroundColor: '#F0EAE0',
-    overflow: 'hidden',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    paddingBottom: 6,
+    width: THUMB_W, height: 88, borderRadius: 14,
+    backgroundColor: '#F0EAE0', overflow: 'hidden',
+    alignItems: 'center', justifyContent: 'flex-end', paddingBottom: 6,
   },
-  thumbImage: {
-    position: 'absolute',
-    width: THUMB_W,
-    height: 88,
-  },
-  thumbLabel: {
-    fontFamily: MONO,
-    fontSize: 9,
-    color: MUTED,
-    letterSpacing: 0.3,
-  },
-  emptyGrid: {
-    paddingTop: 24,
-    alignItems: 'center',
-  },
-  emptyGridText: {
-    fontFamily: MONO,
-    fontSize: 11,
-    color: '#CCBFB5',
-    letterSpacing: 0.5,
-  },
+  thumbImage: { position: 'absolute', width: THUMB_W, height: 88 },
+  emptyGrid: { paddingTop: 24, alignItems: 'center' },
+  emptyGridText: { fontFamily: MONO, fontSize: 11, color: '#CCBFB5', letterSpacing: 0.5 },
 
-  // Star save button inside canvas
   starBtn: {
-    position: 'absolute',
-    bottom: 14,
-    right: 14,
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    position: 'absolute', bottom: 14, right: 14,
+    width: 36, height: 36, borderRadius: 18,
     backgroundColor: 'rgba(255,255,255,0.85)',
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: 'center', alignItems: 'center',
   },
-
 });

@@ -25,8 +25,15 @@ export function CalendarProvider({ children }) {
   const saveEntry = (dateStr, data) =>
     setEntries(prev => ({ ...prev, [dateStr]: data }));
 
+  const removeEntry = (dateStr) =>
+    setEntries(prev => {
+      const next = { ...prev };
+      delete next[dateStr];
+      return next;
+    });
+
   return (
-    <CalendarContext.Provider value={{ entries, saveEntry }}>
+    <CalendarContext.Provider value={{ entries, saveEntry, removeEntry }}>
       {children}
     </CalendarContext.Provider>
   );
