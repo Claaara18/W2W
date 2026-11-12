@@ -573,7 +573,7 @@ export default function MatchScreen() {
           </View>
         )}
         <TouchableOpacity style={styles.starBtn} activeOpacity={0.75} onPress={saveLook}>
-          <Ionicons name="star-outline" size={20} color={MUTED} />
+          <Ionicons name="heart-outline" size={20} color="#A99A8A" />
         </TouchableOpacity>
       </Animated.View>
 

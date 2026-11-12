@@ -114,7 +114,7 @@ function PreviewItems({ look, layout }) {
   ));
 }
 
-export default function CollectionScreen() {
+export default function CollectionScreen({ onBack } = {}) {
   const [view, setView]         = useState('list');
   const [selCat, setSelCat]     = useState(null);
   const [editModal, setEditModal] = useState(false);
@@ -153,8 +153,15 @@ export default function CollectionScreen() {
     return (
       <SafeAreaView style={styles.safe} edges={['top']}>
         <View style={styles.listHeader}>
-          <View>
-            <Text style={styles.pageTitle}>Collection</Text>
+          <View style={styles.listHeaderLeft}>
+            {onBack && (
+              <TouchableOpacity onPress={onBack} hitSlop={12} style={styles.backBtn}>
+                <Ionicons name="chevron-back" size={26} color={DARK} />
+              </TouchableOpacity>
+            )}
+            <Text style={styles.pageTitle} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
+              Collection
+            </Text>
           </View>
           <View style={styles.totalBox}>
             <Text style={styles.totalNum}>{totalLooks}</Text>
@@ -291,15 +298,23 @@ const styles = StyleSheet.create({
 
   listHeader: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-end',
+    alignItems: 'center',
     paddingHorizontal: 22,
     paddingTop: 18,
     paddingBottom: 14,
   },
+  listHeaderLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  backBtn: {
+    marginRight: 6,
+  },
   chapter: { fontSize: 11, color: MUTED, letterSpacing: 0.8, marginBottom: 2 },
-  pageTitle: { fontFamily: SERIF, fontSize: 38, fontWeight: '700', color: DARK, lineHeight: 42 },
-  totalBox: { alignItems: 'flex-end', paddingBottom: 4 },
+  pageTitle: { fontFamily: SERIF, fontSize: 32, fontWeight: '700', color: DARK, lineHeight: 36, flexShrink: 1 },
+  totalBox: { alignItems: 'flex-end' },
   totalNum: { fontFamily: SERIF, fontSize: 20, fontWeight: '700', color: DARK, lineHeight: 22 },
   totalLabel: { fontFamily: MONO, fontSize: 8, color: MUTED, letterSpacing: 1.2 },
   divider: { height: 1, backgroundColor: BORDER, marginHorizontal: 22, marginBottom: 10 },

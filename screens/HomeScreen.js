@@ -224,7 +224,7 @@ function OutfitCard({ outfit, isFavorite, onToggleFav, onAddToCalendar }) {
           <Ionicons
             name={isFavorite ? 'heart' : 'heart-outline'}
             size={15}
-            color={isFavorite ? '#C0392B' : '#888'}
+            color="#A99A8A"
           />
         </TouchableOpacity>
       </View>

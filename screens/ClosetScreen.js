@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useWardrobe } from '../context/WardrobeContext';
+import CollectionScreen from './CollectionScreen';
 import {
   View, Text, ScrollView, TouchableOpacity, FlatList,
   StyleSheet, Dimensions, Modal, Image, Platform, Alert,
@@ -217,8 +218,9 @@ const removeWithRemoveBg = async (uri) => {
 
 // ─────────────────────────────────────────────────────────────
 export default function ClosetScreen() {
-  const [view, setView]         = useState('list');   // 'list' | 'detail'
-  const [selCat, setSelCat]     = useState(null);
+  const [view, setView]             = useState('list');   // 'list' | 'detail'
+  const [selCat, setSelCat]         = useState(null);
+  const [showCollection, setShowCollection] = useState(false);
   const { items, addItem, updateItem, removeItem } = useWardrobe();
 
   // Modals
@@ -338,6 +340,10 @@ export default function ClosetScreen() {
     setEditModal(false);
   };
 
+  if (showCollection) {
+    return <CollectionScreen onBack={() => setShowCollection(false)} />;
+  }
+
   // ── ─────────────────────────────────────────────────────────
   // RENDER: List view
   // ── ─────────────────────────────────────────────────────────
@@ -346,9 +352,14 @@ export default function ClosetScreen() {
       <SafeAreaView style={styles.safe} edges={['top']}>
         {/* Header */}
         <View style={styles.listHeader}>
-          <View>
-            <Text style={styles.pageTitle}>Closet</Text>
-          </View>
+          <Text style={styles.pageTitle}>Closet</Text>
+          <TouchableOpacity
+            onPress={() => setShowCollection(true)}
+            hitSlop={12}
+            style={styles.collectionBtn}
+          >
+            <Ionicons name="heart" size={26} color="#A99A8A" />
+          </TouchableOpacity>
         </View>
         <View style={styles.divider} />
 
@@ -540,6 +551,9 @@ const styles = StyleSheet.create({
     fontSize: 36,
     fontWeight: '700',
     color: DARK,
+  },
+  collectionBtn: {
+    paddingBottom: 4,
   },
   cameraCircle: {
     width: 40, height: 40,

@@ -9,7 +9,6 @@ import { CalendarProvider }   from './context/CalendarContext';
 
 import HomeScreen from './screens/HomeScreen';
 import MatchScreen from './screens/MatchScreen';
-import CollectionScreen from './screens/CollectionScreen';
 import ClosetScreen from './screens/ClosetScreen';
 import CalendarScreen from './screens/CalendarScreen';
 
@@ -52,15 +51,6 @@ export default function App() {
           },
         }}
       >
-        <Tab.Screen
-          name="COLLECTION"
-          component={CollectionScreen}
-          options={{
-            tabBarIcon: ({ color, size }) => (
-              <Ionicons name="heart" size={size} color={color} />
-            ),
-          }}
-        />
         <Tab.Screen
           name="MATCH"
           component={MatchScreen}
