@@ -11,6 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
+import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 
 // ⚠️  TEST ONLY — EXPO_PUBLIC_ vars are bundled into the app binary.
 // For production, move this call to a Firebase Cloud Function.
@@ -163,6 +164,25 @@ const removeWithHuggingFace = async (uri) => {
   }
 };
 
+// 上傳前先轉成 JPEG 並縮小（remove.bg 不收 HEIC；原圖太大上傳很慢）
+const prepareImage = async (uri) => {
+  let img = await ImageManipulator.manipulate(uri).renderAsync();
+  if (img.width > 1500) {
+    const ctx = ImageManipulator.manipulate(uri);
+    ctx.resize({ width: 1500 });
+    img = await ctx.renderAsync();
+  }
+  const out = await img.saveAsync({ format: SaveFormat.JPEG, compress: 0.85 });
+  return out.uri;
+};
+
+// 去背失敗時，把原圖存進 documentDirectory，照樣加入衣櫃
+const keepOriginal = async (uri) => {
+  const dest = `${FileSystem.documentDirectory}item_${Date.now()}_orig.jpg`;
+  await FileSystem.copyAsync({ from: uri, to: dest });
+  return dest;
+};
+
 // remove.bg — base64 JSON（RN 0.76+ 不再支援 FormData { uri } 物件）
 const removeWithRemoveBg = async (uri) => {
   const apiKey = process.env.EXPO_PUBLIC_REMOVE_BG_API_KEY;
@@ -220,6 +240,7 @@ const removeWithRemoveBg = async (uri) => {
 export default function ClosetScreen() {
   const [view, setView]             = useState('list');   // 'list' | 'detail'
   const [selCat, setSelCat]         = useState(null);
+  const [processing, setProcessing] = useState(null); // { done, total }
   const [showCollection, setShowCollection] = useState(false);
   const { items, addItem, updateItem, removeItem } = useWardrobe();
 
@@ -239,7 +260,7 @@ export default function ClosetScreen() {
   const onCameraPress = (targetCatId = null) => {
     Alert.alert(
       '新增單品',
-      undefined,
+      '拍攝小提醒：衣服平放或掛起、正面朝前、手不要入鏡、背景單純，去背效果最好。',
       [
         { text: '拍照',       onPress: () => pickImage('camera',  targetCatId) },
         { text: '從相簿選取', onPress: () => pickImage('library', targetCatId) },
@@ -299,25 +320,44 @@ export default function ClosetScreen() {
 
   const processAndAdd = async (catId, uris) => {
     const baseCount = items[catId]?.length ?? 0;
-    const errors = [];
+    const failed = [];
     let added = 0;
-    for (let i = 0; i < uris.length; i++) {
-      const ts = Date.now() + i;
-      try {
-        const processedUri = await removeBackground(uris[i]);
-        addItem(catId, {
-          id: `${catId}_${ts}`,
-          uri: processedUri,
-          label: `look ${baseCount + added + 1}`,
-        });
-        added++;
-      } catch (err) {
-        console.error(`[processAndAdd] 第 ${i + 1} 張失敗：`, err.message);
-        errors.push(`第 ${i + 1} 張：${err.message}`);
+    setProcessing({ done: 0, total: uris.length });
+    try {
+      for (let i = 0; i < uris.length; i++) {
+        const ts = Date.now() + i;
+        let finalUri = null;
+        let bgRemoved = true;
+        let prepared = uris[i];
+        try {
+          prepared = await prepareImage(uris[i]);
+          finalUri = await removeBackground(prepared);
+        } catch (err) {
+          console.warn(`[processAndAdd] 第 ${i + 1} 張去背失敗，改存原圖：`, err.message);
+          failed.push(i + 1);
+          bgRemoved = false;
+          try { finalUri = await keepOriginal(prepared); }
+          catch (e2) { console.error('[processAndAdd] 保存原圖也失敗：', e2.message); }
+        }
+        if (finalUri) {
+          addItem(catId, {
+            id: `${catId}_${ts}`,
+            uri: finalUri,
+            label: `look ${baseCount + added + 1}`,
+            bgRemoved,
+          });
+          added++;
+        }
+        setProcessing({ done: i + 1, total: uris.length });
       }
+    } finally {
+      setProcessing(null);
     }
-    if (errors.length > 0) {
-      Alert.alert('去背失敗', errors.join('\n\n'));
+    if (failed.length > 0) {
+      setTimeout(() => Alert.alert(
+        '部分照片未去背',
+        `第 ${failed.join('、')} 張去背失敗，已先保留原圖加入衣櫃。\n建議使用背景單純、衣服完整的照片。`
+      ), 300);
     }
   };
 
@@ -485,16 +525,20 @@ export default function ClosetScreen() {
           </View>
         </TouchableWithoutFeedback>
       </Modal>
+
+      {processing && (
+        <ProcessingOverlay text={`去背中 ${Math.min(processing.done + 1, processing.total)}/${processing.total}…`} />
+      )}
     </SafeAreaView>
   );
 }
 
 // ── Sub-components ────────────────────────────────────────────
-const ProcessingOverlay = () => (
+const ProcessingOverlay = ({ text = 'AI 去背中…' }) => (
   <View style={styles.overlay}>
     <View style={styles.overlayBox}>
       <ActivityIndicator size="large" color={DARK} />
-      <Text style={styles.overlayText}>AI 去背中…</Text>
+      <Text style={styles.overlayText}>{text}</Text>
     </View>
   </View>
 );

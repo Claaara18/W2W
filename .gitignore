@@ -1,0 +1,14 @@
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+
+# local env files (API keys)
+.env*.local
+.env
+
+# macOS
+.DS_Store

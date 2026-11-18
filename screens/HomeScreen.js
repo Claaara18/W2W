@@ -7,6 +7,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useWardrobe } from '../context/WardrobeContext';
 import { useCollection, STYLE_CATEGORIES } from '../context/CollectionContext';
 import { useCalendar } from '../context/CalendarContext';
@@ -378,23 +379,50 @@ export default function HomeScreen() {
   // Fetch weather
   useEffect(() => { loadWeather(); }, []);
 
+  const withTimeout = (promise, ms, label) => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(label + ' 逾時')), ms)),
+  ]);
+
   const loadWeather = async () => {
     try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
+      console.log('[weather] 1. 請求定位權限');
+      const { status } = await withTimeout(Location.requestForegroundPermissionsAsync(), 20000, '權限');
+      console.log('[weather]    權限結果:', status);
       if (status !== 'granted') {
         setWeather({ temp: '--', desc: '無法取得位置', en: 'N/A', icon: 'cloud-outline' });
         return;
       }
-      const loc  = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Low });
+      console.log('[weather] 2. 取得位置');
+      const last = await withTimeout(Location.getLastKnownPositionAsync({ maxAge: 30 * 60 * 1000 }), 3000, '上次位置').catch(() => null);
+      const loc = last ?? await withTimeout(Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Low }), 8000, '定位');
       const { latitude, longitude } = loc.coords;
-      const res  = await fetch(
-        `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weathercode&temperature_unit=celsius`
-      );
+      console.log('[weather] 3. 呼叫天氣 API');
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weathercode&temperature_unit=celsius`;
+      let res;
+      try {
+        res = await withTimeout(fetch(url), 12000, '天氣 API');
+      } catch (e) {
+        console.log('[weather]    第一次失敗，重試一次');
+        res = await withTimeout(fetch(url), 12000, '天氣 API（重試）');
+      }
       const data = await res.json();
       const info = getWeatherInfo(data.current.weathercode);
-      setWeather({ temp: Math.round(data.current.temperature_2m), ...info });
-    } catch {
-      setWeather({ temp: '--', desc: '載入失敗', en: 'N/A', icon: 'cloud-outline' });
+      const fresh = { temp: Math.round(data.current.temperature_2m), ...info };
+      setWeather(fresh);
+      AsyncStorage.setItem('w2w_last_weather', JSON.stringify({ ...fresh, at: Date.now() })).catch(() => {});
+      console.log('[weather] ✓ 完成');
+    } catch (e) {
+      console.warn('[weather] ✗ 失敗:', e?.message);
+      const cached = await AsyncStorage.getItem('w2w_last_weather').then(JSON.parse).catch(() => null);
+      if (cached && Date.now() - cached.at < 12 * 60 * 60 * 1000) {
+        const t = new Date(cached.at);
+        const hhmm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+        console.log('[weather]    改用上次的天氣（' + hhmm + '）');
+        setWeather({ ...cached, desc: `${cached.desc}・${hhmm} 更新` });
+      } else {
+        setWeather({ temp: '--', desc: '載入失敗', en: 'N/A', icon: 'cloud-outline' });
+      }
     } finally {
       setWeatherLoading(false);
     }

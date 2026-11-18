@@ -9,7 +9,8 @@ import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { captureRef } from 'react-native-view-shot';
-import * as MediaLibrary from 'expo-media-library';
+// SDK 57: root entry is the new class-based API (no web impl, saveToLibraryAsync throws); use legacy
+import * as MediaLibrary from 'expo-media-library/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { STICKER_CATS, STICKER_SOURCES } from '../data/stickers';
 
@@ -1037,6 +1038,11 @@ export default function JournalScreen({ visible, onClose, viewYear, viewMonth, e
   };
 
   const handleSave = async () => {
+    if (Platform.OS === 'web') {
+      // Alert.alert is a no-op on react-native-web
+      window.alert('Web 版不支援儲存至相簿，請在 iOS App 使用此功能');
+      return;
+    }
     setSelectedId(null); setCapturing(true);
     scrollRef.current?.scrollTo({ y:0, animated:false });
     await new Promise(r => setTimeout(r,150));
