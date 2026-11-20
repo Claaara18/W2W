@@ -12,6 +12,8 @@ import { useWardrobe } from '../context/WardrobeContext';
 import { useCollection, STYLE_CATEGORIES } from '../context/CollectionContext';
 import { useCalendar } from '../context/CalendarContext';
 import { recommendOutfits } from '../utils/outfitRecommender';
+import { useIsFocused } from '@react-navigation/native';
+import Squirrel from '../components/Squirrel';
 
 const BEIGE       = '#F5EFE6';
 const DARK        = '#1A1108';
@@ -526,7 +528,14 @@ export default function HomeScreen() {
   const ctaBar     = useRef(new Animated.Value(0)).current;
   const displayTemp = useCountUp(weather?.temp);
 
-  useEffect(() => () => clearTimeout(thinkTimer.current), []);
+  const [sqPose,     setSqPose]     = useState('idle');
+  const happyTimer = useRef(null);
+  const isFocused  = useIsFocused();
+
+  useEffect(() => () => {
+    clearTimeout(thinkTimer.current);
+    clearTimeout(happyTimer.current);
+  }, []);
 
   const findSavedCat = (outfitId) =>
     Object.keys(collLooks).find(cat => (collLooks[cat] ?? []).some(l => l.id === outfitId));
@@ -652,21 +661,32 @@ export default function HomeScreen() {
   const hasResults = showRecs && recommendations.length > 0;
 
   const cancelThinking = () => {
+    if (!thinking) return;
     clearTimeout(thinkTimer.current);
     ctaBar.stopAnimation();
     ctaBar.setValue(0);
     setThinking(false);
+    setSqPose('idle');
   };
 
   // Short "styling" beat (≤ 800ms) with a progress bar, then deal the looks
   const onCtaPress = () => {
     if (thinking) return;
     const shuffle = hasResults;
+    const willShow = !weatherLoading && recommendations.length > 0;
+    clearTimeout(happyTimer.current);
+    setSqPose('think');
     setThinking(true);
     ctaBar.setValue(0);
     Animated.timing(ctaBar, { toValue: 1, duration: THINK_MS, easing: Easing.linear, useNativeDriver: true }).start();
     thinkTimer.current = setTimeout(() => {
       if (shuffle) setSeed(s => s + 1);
+      if (willShow) {
+        setSqPose('happy');
+        happyTimer.current = setTimeout(() => setSqPose('idle'), 1500);
+      } else {
+        setSqPose('idle');
+      }
       ctaBar.setValue(0);
       setThinking(false);
       setActiveLook(0);
@@ -686,8 +706,15 @@ export default function HomeScreen() {
 
         {/* Header */}
         <View style={styles.header}>
-          <TitleLine style={styles.titleTop}>What to</TitleLine>
-          <TitleLine style={styles.titleBottom} delay={120}>wear?</TitleLine>
+          <View>
+            <TitleLine style={styles.titleTop}>What to</TitleLine>
+            <TitleLine style={styles.titleBottom} delay={120}>wear?</TitleLine>
+
+            {/* Mascot — stands right of the title, never takes touches */}
+            <Rise delay={260} pointerEvents="none" style={styles.heroSquirrel}>
+              <Squirrel pose={sqPose} paused={!isFocused} />
+            </Rise>
+          </View>
           <Rise delay={260 + 80 * 1}>
             <Text style={styles.subtitle}>A small ritual, every morning.</Text>
           </Rise>
@@ -866,6 +893,7 @@ const styles = StyleSheet.create({
 
   header: { paddingHorizontal: 20, paddingTop: 22, paddingBottom: 28 },
   titleMask: { overflow: 'hidden', paddingBottom: 4 },
+  heroSquirrel: { position: 'absolute', right: -20, bottom: 0 },
   titleTop: {
     fontFamily: SERIF, fontSize: 38, fontWeight: '400', color: DARK, lineHeight: 44,
   },
