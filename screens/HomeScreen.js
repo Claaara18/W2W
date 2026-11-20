@@ -538,10 +538,12 @@ export default function HomeScreen() {
   const recomputePerches = () => {
     const p = {};
     if (lay.header && lay.title) {
-      p.hero = { x: width - 75, y: lay.header.y + lay.title.y + lay.title.height - 6 };
+      // wander: idle-hop range around the perch; capped on the right so the tail stays on screen
+      p.hero = { x: width - 75, y: lay.header.y + lay.title.y + lay.title.height - 6, wander: [-20, 12] };
     }
     if (lay.edit && lay.editHead) {
-      p.head = { x: width - 62, y: lay.edit.y + lay.editHead.y + lay.editHead.height + 16 };
+      // head: only drift toward the screen edge, never further in over the buttons
+      p.head = { x: width - 62, y: lay.edit.y + lay.editHead.y + lay.editHead.height + 16, wander: [0, 12] };
     }
     setPerches(prev => (JSON.stringify(prev) === JSON.stringify(p) ? prev : p));
   };
@@ -694,6 +696,16 @@ export default function HomeScreen() {
     setCalPickerVisible(true);
   };
 
+  // Wraps the save (unchanged) and lets the squirrel react only when it actually saved
+  const onCalendarSave = (dateStr) => {
+    const willSave = !!calPickingOutfit;   // saveOutfitToCalendar bails out without an outfit
+    saveOutfitToCalendar(dateStr);
+    if (!willSave) return;
+    sqRef.current?.touch('tap');   // taps inside the Modal don't reach the screen's onTouchStart
+    sqRef.current?.celebrate(2, { pose: 'acorn' });
+    sqRef.current?.say('今天也穿得很好');
+  };
+
   const saveOutfitToCalendar = (dateStr) => {
     if (!calPickingOutfit) return;
     const snapshot = calPickingOutfit.items.map((item, i, arr) => {
@@ -714,6 +726,15 @@ export default function HomeScreen() {
 
   const hasResults = showRecs && recommendations.length > 0;
 
+  // A few random garments from the real wardrobe for the squirrel's thinking bubble
+  const bubbleGarments = () =>
+    Object.values(wardrobe ?? {})
+      .flatMap(arr => arr ?? [])
+      .map(item => item?.uri)
+      .filter(Boolean)
+      .sort(() => Math.random() - 0.5)
+      .slice(0, 6);
+
   const cancelThinking = () => {
     if (!thinking) return;
     clearTimeout(thinkTimer.current);
@@ -730,8 +751,9 @@ export default function HomeScreen() {
     const shuffle = hasResults;
     const willShow = !weatherLoading && recommendations.length > 0;
     // Think right where it stands — no travelling while the beat is this short
+    sqRef.current?.touch('recommend');
     sqRef.current?.stop();
-    sqRef.current?.setPose('think');
+    sqRef.current?.think(bubbleGarments());
     setThinking(true);
     ctaBar.setValue(0);
     Animated.timing(ctaBar, { toValue: 1, duration: THINK_MS, easing: Easing.linear, useNativeDriver: true }).start();
@@ -745,11 +767,11 @@ export default function HomeScreen() {
       if (!willShow) {
         sq?.setPose('idle');
       } else if (sq?.isAt('head')) {
-        sq.celebrate(2);   // already beside the edit title (e.g. shuffling): celebrate on the spot
+        sq.celebrate(2, { confetti: true });   // already beside the edit title (e.g. shuffling): celebrate on the spot
       } else {
         sq?.setPose('idle');
         sq?.goTo('head', { step: 44, height: 22, ms: 210 })
-          .then(arrived => { if (arrived) sqRef.current?.celebrate(2); });
+          .then(arrived => { if (arrived) sqRef.current?.celebrate(2, { confetti: true }); });
       }
       ctaBar.setValue(0);
       setThinking(false);
@@ -764,9 +786,14 @@ export default function HomeScreen() {
 
   // ── Render ──
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
+    // Any touch or scroll counts as activity for the squirrel (sleep countdown / wake up)
+    <SafeAreaView style={styles.safe} edges={['top']} onTouchStart={() => sqRef.current?.touch('tap')}>
       <WeatherAnimation icon={weather?.icon} />
-      <ScrollView ref={scrollRef} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        ref={scrollRef}
+        showsVerticalScrollIndicator={false}
+        onScrollBeginDrag={() => sqRef.current?.touch('scroll')}
+      >
 
         {/* Header */}
         <View style={styles.header} onLayout={onLay('header')}>
@@ -948,7 +975,7 @@ export default function HomeScreen() {
       <CalendarPickerModal
         visible={calPickerVisible}
         onClose={() => { setCalPickerVisible(false); setCalPickingOutfit(null); }}
-        onSave={saveOutfitToCalendar}
+        onSave={onCalendarSave}
       />
 
     </SafeAreaView>

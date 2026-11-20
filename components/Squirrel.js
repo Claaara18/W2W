@@ -1,5 +1,5 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
-import { Image, Animated, Easing, StyleSheet, AccessibilityInfo, Dimensions } from 'react-native';
+import { View, Text, Image, Pressable, Animated, Easing, StyleSheet, AccessibilityInfo, Dimensions } from 'react-native';
 import * as Haptics from 'expo-haptics';
 
 // ── W2W mascot ──
@@ -51,6 +51,12 @@ const cycle = (v, ms, easing = Easing.linear) =>
   Animated.loop(Animated.timing(v, { toValue: 1, duration: ms, easing, useNativeDriver: true }));
 
 const AIR = 0.82;   // airborne share of each hop; the rest is the landing squash
+const SLEEP_AFTER = 12000;   // ms without user activity before dozing off
+
+// Dev-only tracing; silent in production builds
+const log = (...args) => {
+  if (__DEV__) console.log('[squirrel]', ...args);
+};
 
 // Where a hop sequence is at `elapsed` ms — same maths as the prototype's hopTo()
 const hopPoint = ({ x0, y0, tx, ty, n, ms }, elapsed) => {
@@ -61,6 +67,62 @@ const hopPoint = ({ x0, y0, tx, ty, n, ms }, elapsed) => {
   const g = (i + Math.min(1, p / AIR)) / n;
   return { x: x0 + (tx - x0) * g, y: y0 + (ty - y0) * g };
 };
+
+// ── Effects (all pointer-transparent; positioned relative to the feet) ──
+const FEET_TOP    = SQUIRREL_H - FEET_Y;   // feet y inside the frame
+const CONFETTI    = ['#C9A46A', '#8A5A2B', '#F2E4BC', '#E0C9C9', '#C9D1E3', '#E9B24A'];
+const BUBBLE_STEP = 300;                  // ms per garment in the thinking bubble
+
+// One confetti bit: bursts up from above the head, then falls and fades (~1s)
+function ConfettiBit({ bit }) {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const a = Animated.timing(v, { toValue: 1, duration: bit.ms, easing: Easing.bezier(0.1, 0.7, 0.3, 1), useNativeDriver: true });
+    a.start();
+    return () => a.stop();
+  }, []);
+  return (
+    <Animated.View style={[styles.bit, {
+      backgroundColor: bit.color,
+      borderRadius: bit.round ? 4 : 2,
+      opacity: v.interpolate({ inputRange: [0, 0.45, 1], outputRange: [1, 1, 0] }),
+      transform: [
+        { translateX: v.interpolate({ inputRange: [0, 0.45, 1], outputRange: [0, bit.dx, bit.dx * 1.25] }) },
+        { translateY: v.interpolate({ inputRange: [0, 0.45, 1], outputRange: [0, bit.dy, bit.dy + bit.fall] }) },
+        { rotate:     v.interpolate({ inputRange: [0, 0.45, 1], outputRange: ['0deg', `${bit.r1}deg`, `${bit.r2}deg`] }) },
+        { scale:      v.interpolate({ inputRange: [0, 0.45, 1], outputRange: [0.4, 1, 0.8] }) },
+      ],
+    }]} />
+  );
+}
+
+const makeBurst = (n = 18) => Array.from({ length: n }, (_, i) => {
+  const a = rand(-Math.PI * 0.95, -Math.PI * 0.05);   // upward fan
+  const v = rand(50, 105);
+  return {
+    color: CONFETTI[i % CONFETTI.length], round: i % 3 === 0,
+    dx: Math.cos(a) * v, dy: Math.sin(a) * v, fall: rand(70, 120),
+    r1: rand(120, 300), r2: rand(300, 560), ms: rand(900, 1300),
+  };
+});
+
+// A short line that floats up over the head and fades (1.5s)
+function FloatText({ text }) {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const a = Animated.timing(v, { toValue: 1, duration: 1500, easing: Easing.out(Easing.quad), useNativeDriver: true });
+    a.start();
+    return () => a.stop();
+  }, []);
+  return (
+    <Animated.View style={[styles.say, {
+      opacity:   v.interpolate({ inputRange: [0, 0.25, 0.75, 1], outputRange: [0, 1, 1, 0] }),
+      transform: [{ translateY: v.interpolate({ inputRange: [0, 0.25, 1], outputRange: [0, -16, -42] }) }],
+    }]}>
+      <Text style={styles.sayText} numberOfLines={1}>{text}</Text>
+    </Animated.View>
+  );
+}
 
 function Layer({ source, style }) {
   return (
@@ -94,16 +156,94 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
   const posY   = useRef(new Animated.Value(0)).current;
   const dir    = useRef(new Animated.Value(1)).current;   // 1 = default facing, -1 = flipped
   const shown  = useRef(new Animated.Value(0)).current;
-  const hopP   = useRef(new Animated.Value(1)).current;   // 0→1 within each hop; rests at 1
+  // hopP / jumpP count whole hops/jumps (0 → n); the visual phase is their fractional part.
+  // (No Animated.loop here: a native-driver loop never fires its completion callback.)
+  const hopP   = useRef(new Animated.Value(0)).current;
   const hopH   = useRef(new Animated.Value(16)).current;
-  const jumpP  = useRef(new Animated.Value(1)).current;   // 0→1 within each jump; rests at 1
+  const jumpP  = useRef(new Animated.Value(0)).current;
   const jumpH  = useRef(new Animated.Value(30)).current;
-  const S = useRef({ x: 0, y: 0, perch: null, token: 0, anim: null, motion: null, timers: [] }).current;
+  const S = useRef({
+    x: 0, y: 0, perch: null, token: 0, anim: null, motion: null, timers: [],
+    entered: false, sleepTimer: null, taps: 0,
+  }).current;
   const perchesRef = useRef(perches);
+  const poseRef    = useRef('idle');
   const reduceRef  = useRef(reduceMotion);
   reduceRef.current = reduceMotion;
+  const pausedRef  = useRef(paused);
+  pausedRef.current = paused;
+  const [entered, setEntered] = useState(false);   // hit area only exists once it's on screen
+  const [excited, setExcited] = useState(false);   // brief fast tail-wag while idle
 
   const place = (x, y) => { S.x = x; S.y = y; posX.setValue(x); posY.setValue(y); };
+
+  // ── Effects state: thinking bubble, confetti burst, floating line ──
+  const bubbleV = useRef(new Animated.Value(0)).current;
+  const [bubble,    setBubble]    = useState(null);   // { uris } while visible
+  const [bubbleIdx, setBubbleIdx] = useState(0);
+  const [burst,     setBurst]     = useState(null);   // { key, bits }
+  const [saying,    setSaying]    = useState(null);   // { key, text }
+  const fx = useRef({ bubbleOn: false, bubbleAnim: null, burstTimer: null, sayTimer: null }).current;
+
+  // Cycle the garments in the bubble every BUBBLE_STEP ms
+  useEffect(() => {
+    if (!bubble || bubble.uris.length < 2) return;
+    const id = setInterval(() => setBubbleIdx(i => (i + 1) % bubble.uris.length), BUBBLE_STEP);
+    return () => clearInterval(id);
+  }, [bubble]);
+
+  useEffect(() => () => {
+    fx.bubbleAnim?.stop();
+    clearTimeout(fx.burstTimer);
+    clearTimeout(fx.sayTimer);
+  }, []);
+
+  const showBubble = (uris) => {
+    fx.bubbleOn = true;
+    fx.bubbleAnim?.stop();
+    setBubbleIdx(0);
+    setBubble({ uris });
+    fx.bubbleAnim = Animated.timing(bubbleV, { toValue: 1, duration: 260, easing: Easing.out(Easing.back(1.8)), useNativeDriver: true });
+    fx.bubbleAnim.start();
+  };
+
+  // Shrink the bubble away, then unmount it
+  const hideBubble = () => {
+    if (!fx.bubbleOn) return;
+    fx.bubbleOn = false;
+    log('bubble hide');
+    fx.bubbleAnim?.stop();
+    fx.bubbleAnim = Animated.timing(bubbleV, { toValue: 0, duration: 180, easing: Easing.in(Easing.quad), useNativeDriver: true });
+    fx.bubbleAnim.start(({ finished }) => { if (finished && !fx.bubbleOn) setBubble(null); });
+  };
+
+  // ~18 bits bursting from above the head
+  const confetti = () => {
+    if (reduceRef.current) return;
+    log('confetti');
+    clearTimeout(fx.burstTimer);
+    setBurst({ key: Date.now(), bits: makeBurst() });
+    fx.burstTimer = setTimeout(() => setBurst(null), 1400);
+  };
+
+  // A short line floating up over the head
+  const say = (text) => {
+    log('say', text);
+    clearTimeout(fx.sayTimer);
+    setSaying({ key: Date.now(), text });
+    fx.sayTimer = setTimeout(() => setSaying(null), 1600);
+  };
+
+  // Action timers: cleared by interrupt(), and drop out of S.timers once they fire
+  const later = (fn, ms) => {
+    const id = setTimeout(() => { S.timers = S.timers.filter(t => t !== id); fn(); }, ms);
+    S.timers.push(id);
+  };
+  const wait = (ms) => new Promise(res => later(res, ms));
+
+  // Free to wander / fall asleep: on screen, idle pose, not hopping, jumping or mid-celebration
+  const canIdle = () =>
+    S.entered && poseRef.current === 'idle' && !S.anim && !S.motion && S.timers.length === 0;
 
   // Stop whatever the squirrel is doing, freezing it where it currently is
   const interrupt = () => {
@@ -117,11 +257,11 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
       S.motion = null;
       place(p.x, p.y);
     }
-    hopP.setValue(1);
-    jumpP.setValue(1);
+    hopP.setValue(0);
+    jumpP.setValue(0);
   };
 
-  useEffect(() => () => interrupt(), []);
+  useEffect(() => () => { interrupt(); clearTimeout(S.sleepTimer); }, []);
 
   // Keep a resting squirrel glued to its perch when layout shifts
   useEffect(() => {
@@ -131,8 +271,18 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
   }, [perches]);
 
   const setPose = (p) => {
+    if (poseRef.current !== p) log('pose', poseRef.current, '→', p);
+    poseRef.current = p;
     setPoseState(p);
     if (p !== 'idle') dir.setValue(1);
+    if (p !== 'think') hideBubble();
+  };
+
+  // Think pose with a bubble cycling through real garments (empty list → "?")
+  const think = (uris = []) => {
+    setPose('think');
+    log('bubble show', `${uris.length} garments`);
+    showBubble(uris);
   };
 
   // Small hops toward (tx, ty): stretch on take-off, squash on landing, face the way we go
@@ -148,21 +298,20 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
     hopH.setValue(height);
     hopP.setValue(0);
 
-    const legs = [];
+    const hops = [];
     for (let i = 1; i <= n; i++) {
-      legs.push(Animated.parallel([
-        Animated.timing(posX, { toValue: x0 + (tx - x0) * i / n, duration: ms * AIR, easing: Easing.linear, useNativeDriver: true }),
-        Animated.timing(posY, { toValue: y0 + (ty - y0) * i / n, duration: ms * AIR, easing: Easing.linear, useNativeDriver: true }),
+      hops.push(Animated.parallel([
+        Animated.sequence([
+          Animated.parallel([
+            Animated.timing(posX, { toValue: x0 + (tx - x0) * i / n, duration: ms * AIR, easing: Easing.linear, useNativeDriver: true }),
+            Animated.timing(posY, { toValue: y0 + (ty - y0) * i / n, duration: ms * AIR, easing: Easing.linear, useNativeDriver: true }),
+          ]),
+          Animated.delay(ms * (1 - AIR)),
+        ]),
+        Animated.timing(hopP, { toValue: i, duration: ms, easing: Easing.linear, useNativeDriver: true }),
       ]));
-      legs.push(Animated.delay(ms * (1 - AIR)));
     }
-    const anim = Animated.parallel([
-      Animated.sequence(legs),
-      Animated.loop(
-        Animated.timing(hopP, { toValue: 1, duration: ms, easing: Easing.linear, useNativeDriver: true }),
-        { iterations: n },
-      ),
-    ]);
+    const anim = Animated.sequence(hops);
     S.anim   = anim;
     S.motion = { x0, y0, tx, ty, n, ms, t0: Date.now() };
     anim.start(() => {
@@ -170,7 +319,7 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
       S.anim = null;
       S.motion = null;
       S.x = tx; S.y = ty;
-      hopP.setValue(1);
+      hopP.setValue(0);
       resolve(true);
     });
   });
@@ -183,33 +332,120 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
     return hopTo(p.x, p.y, opts);
   };
 
-  // Happy hops on the spot (430ms each, 30pt high) with a light buzz, then back to idle
-  const celebrate = (times = 2, { pose: p = 'happy', haptic = true } = {}) => new Promise(resolve => {
-    interrupt();
+  // Jump on the spot (430ms each): crouch → up `h` → land squash → rest
+  const jump = (times, h) => new Promise(resolve => {
     const token = S.token;
-    const later = (fn, ms) => S.timers.push(setTimeout(fn, ms));
-    setPose(p);
-    if (haptic) {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-      later(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {}), 50);
-    }
-    const done = () => { if (token === S.token) { setPose('idle'); resolve(true); } else resolve(false); };
-    if (reduceRef.current) { later(done, 900); return; }
-
-    jumpH.setValue(30);
+    if (reduceRef.current) return resolve(true);
+    jumpH.setValue(h);
     jumpP.setValue(0);
-    const anim = Animated.loop(
-      Animated.timing(jumpP, { toValue: 1, duration: 430, easing: Easing.bezier(0.2, 0.7, 0.4, 1), useNativeDriver: true }),
-      { iterations: times },
-    );
+    const anim = Animated.sequence(Array.from({ length: times }, (_, i) =>
+      Animated.timing(jumpP, { toValue: i + 1, duration: 430, easing: Easing.bezier(0.2, 0.7, 0.4, 1), useNativeDriver: true })
+    ));
     S.anim = anim;
     anim.start(() => {
       if (token !== S.token) return resolve(false);
       S.anim = null;
-      jumpP.setValue(1);
-      later(done, 520);
+      jumpP.setValue(0);
+      resolve(true);
     });
   });
+
+  // Happy (or acorn) hops on the spot, 30pt high, with a light buzz, then back to idle
+  const celebrate = async (times = 2, { pose: p = 'happy', haptic = true, confetti: withConfetti = false } = {}) => {
+    interrupt();
+    const token = S.token;
+    setPose(p);
+    if (withConfetti) confetti();
+    if (haptic) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      later(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {}), 50);
+    }
+    if (reduceRef.current) {
+      await wait(900);
+    } else {
+      if (!(await jump(times, 30))) return false;
+      await wait(520);
+    }
+    if (token !== S.token) return false;
+    setPose('idle');
+    return true;
+  };
+
+  const wake = (reason = 'wake') => {
+    if (poseRef.current !== 'sleep') return;
+    log('woke up —', reason);
+    interrupt();
+    setPose('idle');
+    jump(1, 14);
+  };
+
+  // Sleep countdown: one timer, re-armed only by real user activity (and on focus).
+  // If it fires while busy (thinking, hopping, celebrating) it re-checks every second.
+  const trySleep = () => {
+    if (pausedRef.current) return;
+    if (canIdle()) { log('fell asleep'); setPose('sleep'); }
+    else S.sleepTimer = setTimeout(trySleep, 1000);
+  };
+  const armSleep = (reason) => {
+    clearTimeout(S.sleepTimer);
+    log(`sleep timer reset (${SLEEP_AFTER / 1000}s) —`, reason);
+    S.sleepTimer = setTimeout(trySleep, SLEEP_AFTER);
+  };
+
+  // User activity — only call for taps, scrolls and recommend presses
+  const touch = (reason = 'activity') => {
+    if (!pausedRef.current) armSleep(reason);
+    wake(reason);
+  };
+
+  // Tap on the squirrel itself: wake if asleep, otherwise alternate happy / acorn hops
+  const onTap = () => {
+    const wasAsleep = poseRef.current === 'sleep';
+    touch('tap squirrel');
+    if (wasAsleep || !canIdle()) return;
+    const p = S.taps++ % 2 === 0 ? 'happy' : 'acorn';
+    log('tapped →', p);
+    celebrate(1, { pose: p });
+  };
+
+  // One small hop near the current perch, within the perch's wander range (default ±20)
+  const wander = () => {
+    const p = perchesRef.current[S.perch];
+    if (!p || reduceRef.current) return;
+    const [lo, hi] = p.wander ?? [-20, 20];
+    const tx = p.x + rand(lo, hi);
+    if (Math.abs(tx - S.x) < 6) return;
+    log('wander', S.perch, `${Math.round(tx - p.x)}px`);
+    hopTo(tx, p.y, { step: 15, height: 9, ms: 210 });
+  };
+
+  // Idle life while focused: wander / wag every 2.4–4.8s, plus the sleep countdown.
+  // Leaving the tab clears both; coming back starts them again.
+  useEffect(() => {
+    if (paused) { log('paused (tab out of focus)'); clearTimeout(S.sleepTimer); return; }
+    armSleep('focused');
+    let tickTimer, wagTimer;
+    const tick = () => {
+      if (canIdle()) {
+        const r = Math.random();
+        if (r < 0.5) wander();
+        else if (r < 0.75) {
+          log('tail wag');
+          setExcited(true);
+          clearTimeout(wagTimer);
+          wagTimer = setTimeout(() => setExcited(false), 900);
+        }
+      }
+      tickTimer = setTimeout(tick, rand(2400, 4800));
+    };
+    tickTimer = setTimeout(tick, rand(2400, 4800));
+    return () => {
+      clearTimeout(tickTimer);
+      clearTimeout(wagTimer);
+      clearTimeout(S.sleepTimer);
+      setExcited(false);
+    };
+  }, [paused]);
 
   // Hop in from off-screen right, land on the perch, one happy jump
   const enter = async (name = 'hero') => {
@@ -219,19 +455,23 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
     place(Dimensions.get('window').width + 70, p.y);
     Animated.timing(shown, { toValue: 1, duration: 200, useNativeDriver: true }).start();
     S.perch = name;
+    S.entered = true;
+    setEntered(true);
     const arrived = await hopTo(p.x, p.y, { step: 36, height: 18, ms: 220 });
     if (!arrived) return;
     dir.setValue(1);
     await celebrate(1, { haptic: false });
   };
 
-  // Resting on that perch right now (not mid-hop)?
+  // Resting at that perch right now (not mid-hop; idle wandering still counts)?
   const isAt = (name) => {
     const p = perchesRef.current[name];
-    return !!p && S.perch === name && !S.motion && Math.hypot(S.x - p.x, S.y - p.y) < 2;
+    return !!p && S.perch === name && !S.motion && Math.hypot(S.x - p.x, S.y - p.y) < 24;
   };
 
-  useImperativeHandle(ref, () => ({ goTo, setPose, celebrate, enter, stop: interrupt, isAt }));
+  useImperativeHandle(ref, () => ({
+    goTo, setPose, think, celebrate, confetti, say, enter, stop: interrupt, isAt, touch, wake,
+  }));
 
   // Pose switch: 150ms cross-fade
   useEffect(() => {
@@ -264,7 +504,7 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
     }
 
     if (!reduceMotion) {
-      if (pose === 'idle')  { run(pingPong(breath, 1600)); run(pingPong(tail, 2300)); }
+      if (pose === 'idle')  { run(pingPong(breath, 1600)); run(pingPong(tail, excited ? 260 : 2300)); }
       if (pose === 'think') { run(pingPong(sway, 750));    run(cycle(qmark, 1000, Easing.inOut(Easing.sin))); }
       if (pose === 'happy') { run(pingPong(tail, 260));    run(pingPong(spark, 500)); }
       if (pose === 'acorn') { run(pingPong(breath, 1100)); }
@@ -276,7 +516,7 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
       timers.forEach(clearTimeout);
       [breath, tail, sway, qmark, spark, zzz, blink].forEach(v => v.setValue(0));
     };
-  }, [pose, paused, reduceMotion]);
+  }, [pose, paused, reduceMotion, excited]);
 
   const tailRot = tail.interpolate({ inputRange: [0, 1], outputRange: ['1.6deg', '-6.5deg'] });
   const breathe = (sx, sy) => [
@@ -287,27 +527,32 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
   const box = (p) => ({ ...POSE_BOX[p], left: ANCHOR_X + POSE_BOX[p].left, bottom: FEET_Y });
   const poseStyle = (p, transform) => [styles.pose, box(p), { opacity: fades[p] }, transform && { transform }];
 
+  // Phase within the current hop / jump (0→1, back to 0 at rest)
+  const hopPh  = Animated.modulo(hopP, 1);
+  const jumpPh = Animated.modulo(jumpP, 1);
+
   // Hop: lift on a sine-ish arc, stretch in the air, squash on landing; shadow shrinks while airborne
   const hopLift = Animated.multiply(
-    hopP.interpolate({ inputRange: [0, 0.2, 0.41, 0.62, AIR, 1], outputRange: [0, -0.69, -1, -0.69, 0, 0] }),
+    hopPh.interpolate({ inputRange: [0, 0.2, 0.41, 0.62, AIR, 1], outputRange: [0, -0.69, -1, -0.69, 0, 0] }),
     hopH,
   );
-  const hopSX  = hopP.interpolate({ inputRange: [0, 0.41, AIR, 0.91, 1], outputRange: [1, 0.95, 1, 1.07, 1] });
-  const hopSY  = hopP.interpolate({ inputRange: [0, 0.41, AIR, 0.91, 1], outputRange: [1, 1.07, 1, 0.91, 1] });
-  const hopShd = hopP.interpolate({ inputRange: [0, 0.41, AIR, 1], outputRange: [1, 0.7, 1, 1] });
-  // Jump (celebrate): crouch → up → land squash → rest
+  const hopSX  = hopPh.interpolate({ inputRange: [0, 0.41, AIR, 0.91, 1], outputRange: [1, 0.95, 1, 1.07, 1] });
+  const hopSY  = hopPh.interpolate({ inputRange: [0, 0.41, AIR, 0.91, 1], outputRange: [1, 1.07, 1, 0.91, 1] });
+  const hopShd = hopPh.interpolate({ inputRange: [0, 0.41, AIR, 1], outputRange: [1, 0.7, 1, 1] });
+  // Jump (celebrate): quick crouch → up → land squash → rest (phase 0 must be the resting pose)
   const jumpLift = Animated.multiply(
-    jumpP.interpolate({ inputRange: [0, 0.21, 0.42, 0.62, 0.82, 1], outputRange: [0, -0.75, -1, -0.75, 0, 0] }),
+    jumpPh.interpolate({ inputRange: [0, 0.06, 0.24, 0.42, 0.62, 0.82, 1], outputRange: [0, 0, -0.75, -1, -0.75, 0, 0] }),
     jumpH,
   );
-  const jumpSX  = jumpP.interpolate({ inputRange: [0, 0.42, 0.82, 1], outputRange: [1.1, 0.95, 1.1, 1] });
-  const jumpSY  = jumpP.interpolate({ inputRange: [0, 0.42, 0.82, 1], outputRange: [0.86, 1.07, 0.88, 1] });
-  const jumpShd = jumpP.interpolate({ inputRange: [0, 0.42, 0.82, 1], outputRange: [1, 0.7, 1, 1] });
+  const jumpSX  = jumpPh.interpolate({ inputRange: [0, 0.06, 0.42, 0.82, 1], outputRange: [1, 1.1, 0.95, 1.1, 1] });
+  const jumpSY  = jumpPh.interpolate({ inputRange: [0, 0.06, 0.42, 0.82, 1], outputRange: [1, 0.86, 1.07, 0.88, 1] });
+  const jumpShd = jumpPh.interpolate({ inputRange: [0, 0.42, 0.82, 1], outputRange: [1, 0.7, 1, 1] });
   const shadowS = Animated.multiply(hopShd, jumpShd);
 
   return (
+    // Only the body-sized hit area below takes touches; everything visual passes them through
     <Animated.View
-      pointerEvents="none"
+      pointerEvents={entered ? 'box-none' : 'none'}
       style={[styles.frame, style, {
         opacity: shown,
         transform: [
@@ -316,11 +561,11 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
         ],
       }]}
     >
-      <Animated.View style={[styles.shadow, {
+      <Animated.View pointerEvents="none" style={[styles.shadow, {
         transform: [{ scaleX: shadowS }, { scaleY: Animated.multiply(shadowS, 11 / 72) }],
       }]} />
 
-      <Animated.View style={[StyleSheet.absoluteFill, { transform: [{ scaleX: dir }] }]}>
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { transform: [{ scaleX: dir }] }]}>
       <Animated.View style={[StyleSheet.absoluteFill, styles.squash, {
         transform: [
           { translateY: Animated.add(hopLift, jumpLift) },
@@ -382,6 +627,33 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
           </Animated.View>
       </Animated.View>
       </Animated.View>
+
+      {/* Thinking bubble — not mirrored with the body, grows from its tail */}
+      {bubble && (
+        <Animated.View pointerEvents="none" style={[styles.bubble, { opacity: bubbleV, transform: [{ scale: bubbleV }] }]}>
+          <View style={[styles.bubbleDot, styles.bubbleDotBig]} />
+          <View style={[styles.bubbleDot, styles.bubbleDotSmall]} />
+          {bubble.uris.length > 0 ? (
+            <Image source={{ uri: bubble.uris[bubbleIdx % bubble.uris.length] }} style={styles.bubbleImg} resizeMode="contain" />
+          ) : (
+            <Text style={styles.bubbleQ}>?</Text>
+          )}
+        </Animated.View>
+      )}
+
+      {burst && (
+        <View key={burst.key} pointerEvents="none" style={styles.burst}>
+          {burst.bits.map((bit, i) => <ConfettiBit key={i} bit={bit} />)}
+        </View>
+      )}
+
+      {saying && (
+        <View key={saying.key} pointerEvents="none" style={styles.sayWrap}>
+          <FloatText text={saying.text} />
+        </View>
+      )}
+
+      <Pressable style={styles.hit} onPress={onTap} accessibilityRole="button" accessibilityLabel="松鼠" />
     </Animated.View>
   );
 }
@@ -403,4 +675,31 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(70,45,15,0.16)',
   },
   zzz: { position: 'absolute', left: 20, top: -14, width: 33, height: 30 },
+  hit: { position: 'absolute', left: ANCHOR_X - 40, bottom: FEET_Y, width: 80, height: 100, borderRadius: 40 },
+
+  // Bubble sits up-left of the head (as in the prototype), tail dots pointing at the squirrel
+  bubble: {
+    position: 'absolute', left: ANCHOR_X - 98, top: FEET_TOP - 128, width: 50, height: 50,
+    borderRadius: 25, backgroundColor: '#FFFFFF',
+    alignItems: 'center', justifyContent: 'center',
+    transformOrigin: '100% 100%',
+    shadowColor: '#462D0F', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.18, shadowRadius: 8,
+    elevation: 3,
+  },
+  bubbleDot:      { position: 'absolute', backgroundColor: '#FFFFFF', borderRadius: 5 },
+  bubbleDotBig:   { width: 10, height: 10, right: -4, bottom: -3 },
+  bubbleDotSmall: { width: 6, height: 6, right: -12, bottom: -11, borderRadius: 3 },
+  bubbleImg:      { width: 32, height: 32 },
+  bubbleQ:        { fontSize: 24, fontWeight: '700', color: '#5A4628' },
+
+  burst: { position: 'absolute', left: ANCHOR_X - 4, top: FEET_TOP - 64, width: 8, height: 8 },
+  bit:   { position: 'absolute', left: 0, top: 0, width: 8, height: 8 },
+
+  // Line is centred a little left of the feet so it stays on screen at the right-hand perches
+  sayWrap: { position: 'absolute', left: ANCHOR_X - 115, top: FEET_TOP - 136, width: 170, alignItems: 'center' },
+  say: {
+    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999,
+    backgroundColor: 'rgba(251,249,245,0.92)',
+  },
+  sayText: { fontSize: 12, fontWeight: '500', color: '#5A4628', letterSpacing: 0.4 },
 });
