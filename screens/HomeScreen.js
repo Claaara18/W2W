@@ -537,10 +537,12 @@ export default function HomeScreen() {
   const recomputePerches = () => {
     const p = {};
     if (lay.header && lay.title) {
-      p.hero = { x: width - 75, y: lay.header.y + lay.title.y + lay.title.height - 6 };
+      // wander: idle-hop range around the perch; capped on the right so the tail stays on screen
+      p.hero = { x: width - 75, y: lay.header.y + lay.title.y + lay.title.height - 6, wander: [-20, 12] };
     }
     if (lay.edit && lay.editHead) {
-      p.head = { x: width - 62, y: lay.edit.y + lay.editHead.y + lay.editHead.height + 16 };
+      // head: only drift toward the screen edge, never further in over the buttons
+      p.head = { x: width - 62, y: lay.edit.y + lay.editHead.y + lay.editHead.height + 16, wander: [0, 12] };
     }
     setPerches(prev => (JSON.stringify(prev) === JSON.stringify(p) ? prev : p));
   };
@@ -694,6 +696,7 @@ export default function HomeScreen() {
     const shuffle = hasResults;
     const willShow = !weatherLoading && recommendations.length > 0;
     // Think right where it stands — no travelling while the beat is this short
+    sqRef.current?.touch('recommend');
     sqRef.current?.stop();
     sqRef.current?.setPose('think');
     setThinking(true);
@@ -724,9 +727,14 @@ export default function HomeScreen() {
 
   // ── Render ──
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
+    // Any touch or scroll counts as activity for the squirrel (sleep countdown / wake up)
+    <SafeAreaView style={styles.safe} edges={['top']} onTouchStart={() => sqRef.current?.touch('tap')}>
       <WeatherAnimation icon={weather?.icon} />
-      <ScrollView ref={scrollRef} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        ref={scrollRef}
+        showsVerticalScrollIndicator={false}
+        onScrollBeginDrag={() => sqRef.current?.touch('scroll')}
+      >
 
         {/* Header */}
         <View style={styles.header} onLayout={onLay('header')}>
