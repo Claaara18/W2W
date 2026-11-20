@@ -1,5 +1,5 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
-import { Image, Pressable, Animated, Easing, StyleSheet, AccessibilityInfo, Dimensions } from 'react-native';
+import { View, Text, Image, Pressable, Animated, Easing, StyleSheet, AccessibilityInfo, Dimensions } from 'react-native';
 import * as Haptics from 'expo-haptics';
 
 // ── W2W mascot ──
@@ -53,7 +53,10 @@ const cycle = (v, ms, easing = Easing.linear) =>
 const AIR = 0.82;   // airborne share of each hop; the rest is the landing squash
 const SLEEP_AFTER = 12000;   // ms without user activity before dozing off
 
-const log = (...args) => console.log('[squirrel]', ...args);
+// Dev-only tracing; silent in production builds
+const log = (...args) => {
+  if (__DEV__) console.log('[squirrel]', ...args);
+};
 
 // Where a hop sequence is at `elapsed` ms — same maths as the prototype's hopTo()
 const hopPoint = ({ x0, y0, tx, ty, n, ms }, elapsed) => {
@@ -64,6 +67,62 @@ const hopPoint = ({ x0, y0, tx, ty, n, ms }, elapsed) => {
   const g = (i + Math.min(1, p / AIR)) / n;
   return { x: x0 + (tx - x0) * g, y: y0 + (ty - y0) * g };
 };
+
+// ── Effects (all pointer-transparent; positioned relative to the feet) ──
+const FEET_TOP    = SQUIRREL_H - FEET_Y;   // feet y inside the frame
+const CONFETTI    = ['#C9A46A', '#8A5A2B', '#F2E4BC', '#E0C9C9', '#C9D1E3', '#E9B24A'];
+const BUBBLE_STEP = 300;                  // ms per garment in the thinking bubble
+
+// One confetti bit: bursts up from above the head, then falls and fades (~1s)
+function ConfettiBit({ bit }) {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const a = Animated.timing(v, { toValue: 1, duration: bit.ms, easing: Easing.bezier(0.1, 0.7, 0.3, 1), useNativeDriver: true });
+    a.start();
+    return () => a.stop();
+  }, []);
+  return (
+    <Animated.View style={[styles.bit, {
+      backgroundColor: bit.color,
+      borderRadius: bit.round ? 4 : 2,
+      opacity: v.interpolate({ inputRange: [0, 0.45, 1], outputRange: [1, 1, 0] }),
+      transform: [
+        { translateX: v.interpolate({ inputRange: [0, 0.45, 1], outputRange: [0, bit.dx, bit.dx * 1.25] }) },
+        { translateY: v.interpolate({ inputRange: [0, 0.45, 1], outputRange: [0, bit.dy, bit.dy + bit.fall] }) },
+        { rotate:     v.interpolate({ inputRange: [0, 0.45, 1], outputRange: ['0deg', `${bit.r1}deg`, `${bit.r2}deg`] }) },
+        { scale:      v.interpolate({ inputRange: [0, 0.45, 1], outputRange: [0.4, 1, 0.8] }) },
+      ],
+    }]} />
+  );
+}
+
+const makeBurst = (n = 18) => Array.from({ length: n }, (_, i) => {
+  const a = rand(-Math.PI * 0.95, -Math.PI * 0.05);   // upward fan
+  const v = rand(50, 105);
+  return {
+    color: CONFETTI[i % CONFETTI.length], round: i % 3 === 0,
+    dx: Math.cos(a) * v, dy: Math.sin(a) * v, fall: rand(70, 120),
+    r1: rand(120, 300), r2: rand(300, 560), ms: rand(900, 1300),
+  };
+});
+
+// A short line that floats up over the head and fades (1.5s)
+function FloatText({ text }) {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const a = Animated.timing(v, { toValue: 1, duration: 1500, easing: Easing.out(Easing.quad), useNativeDriver: true });
+    a.start();
+    return () => a.stop();
+  }, []);
+  return (
+    <Animated.View style={[styles.say, {
+      opacity:   v.interpolate({ inputRange: [0, 0.25, 0.75, 1], outputRange: [0, 1, 1, 0] }),
+      transform: [{ translateY: v.interpolate({ inputRange: [0, 0.25, 1], outputRange: [0, -16, -42] }) }],
+    }]}>
+      <Text style={styles.sayText} numberOfLines={1}>{text}</Text>
+    </Animated.View>
+  );
+}
 
 function Layer({ source, style }) {
   return (
@@ -118,6 +177,63 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
 
   const place = (x, y) => { S.x = x; S.y = y; posX.setValue(x); posY.setValue(y); };
 
+  // ── Effects state: thinking bubble, confetti burst, floating line ──
+  const bubbleV = useRef(new Animated.Value(0)).current;
+  const [bubble,    setBubble]    = useState(null);   // { uris } while visible
+  const [bubbleIdx, setBubbleIdx] = useState(0);
+  const [burst,     setBurst]     = useState(null);   // { key, bits }
+  const [saying,    setSaying]    = useState(null);   // { key, text }
+  const fx = useRef({ bubbleOn: false, bubbleAnim: null, burstTimer: null, sayTimer: null }).current;
+
+  // Cycle the garments in the bubble every BUBBLE_STEP ms
+  useEffect(() => {
+    if (!bubble || bubble.uris.length < 2) return;
+    const id = setInterval(() => setBubbleIdx(i => (i + 1) % bubble.uris.length), BUBBLE_STEP);
+    return () => clearInterval(id);
+  }, [bubble]);
+
+  useEffect(() => () => {
+    fx.bubbleAnim?.stop();
+    clearTimeout(fx.burstTimer);
+    clearTimeout(fx.sayTimer);
+  }, []);
+
+  const showBubble = (uris) => {
+    fx.bubbleOn = true;
+    fx.bubbleAnim?.stop();
+    setBubbleIdx(0);
+    setBubble({ uris });
+    fx.bubbleAnim = Animated.timing(bubbleV, { toValue: 1, duration: 260, easing: Easing.out(Easing.back(1.8)), useNativeDriver: true });
+    fx.bubbleAnim.start();
+  };
+
+  // Shrink the bubble away, then unmount it
+  const hideBubble = () => {
+    if (!fx.bubbleOn) return;
+    fx.bubbleOn = false;
+    log('bubble hide');
+    fx.bubbleAnim?.stop();
+    fx.bubbleAnim = Animated.timing(bubbleV, { toValue: 0, duration: 180, easing: Easing.in(Easing.quad), useNativeDriver: true });
+    fx.bubbleAnim.start(({ finished }) => { if (finished && !fx.bubbleOn) setBubble(null); });
+  };
+
+  // ~18 bits bursting from above the head
+  const confetti = () => {
+    if (reduceRef.current) return;
+    log('confetti');
+    clearTimeout(fx.burstTimer);
+    setBurst({ key: Date.now(), bits: makeBurst() });
+    fx.burstTimer = setTimeout(() => setBurst(null), 1400);
+  };
+
+  // A short line floating up over the head
+  const say = (text) => {
+    log('say', text);
+    clearTimeout(fx.sayTimer);
+    setSaying({ key: Date.now(), text });
+    fx.sayTimer = setTimeout(() => setSaying(null), 1600);
+  };
+
   // Action timers: cleared by interrupt(), and drop out of S.timers once they fire
   const later = (fn, ms) => {
     const id = setTimeout(() => { S.timers = S.timers.filter(t => t !== id); fn(); }, ms);
@@ -159,6 +275,14 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
     poseRef.current = p;
     setPoseState(p);
     if (p !== 'idle') dir.setValue(1);
+    if (p !== 'think') hideBubble();
+  };
+
+  // Think pose with a bubble cycling through real garments (empty list → "?")
+  const think = (uris = []) => {
+    setPose('think');
+    log('bubble show', `${uris.length} garments`);
+    showBubble(uris);
   };
 
   // Small hops toward (tx, ty): stretch on take-off, squash on landing, face the way we go
@@ -227,10 +351,11 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
   });
 
   // Happy (or acorn) hops on the spot, 30pt high, with a light buzz, then back to idle
-  const celebrate = async (times = 2, { pose: p = 'happy', haptic = true } = {}) => {
+  const celebrate = async (times = 2, { pose: p = 'happy', haptic = true, confetti: withConfetti = false } = {}) => {
     interrupt();
     const token = S.token;
     setPose(p);
+    if (withConfetti) confetti();
     if (haptic) {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
       later(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {}), 50);
@@ -344,7 +469,9 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
     return !!p && S.perch === name && !S.motion && Math.hypot(S.x - p.x, S.y - p.y) < 24;
   };
 
-  useImperativeHandle(ref, () => ({ goTo, setPose, celebrate, enter, stop: interrupt, isAt, touch, wake }));
+  useImperativeHandle(ref, () => ({
+    goTo, setPose, think, celebrate, confetti, say, enter, stop: interrupt, isAt, touch, wake,
+  }));
 
   // Pose switch: 150ms cross-fade
   useEffect(() => {
@@ -501,6 +628,31 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
       </Animated.View>
       </Animated.View>
 
+      {/* Thinking bubble — not mirrored with the body, grows from its tail */}
+      {bubble && (
+        <Animated.View pointerEvents="none" style={[styles.bubble, { opacity: bubbleV, transform: [{ scale: bubbleV }] }]}>
+          <View style={[styles.bubbleDot, styles.bubbleDotBig]} />
+          <View style={[styles.bubbleDot, styles.bubbleDotSmall]} />
+          {bubble.uris.length > 0 ? (
+            <Image source={{ uri: bubble.uris[bubbleIdx % bubble.uris.length] }} style={styles.bubbleImg} resizeMode="contain" />
+          ) : (
+            <Text style={styles.bubbleQ}>?</Text>
+          )}
+        </Animated.View>
+      )}
+
+      {burst && (
+        <View key={burst.key} pointerEvents="none" style={styles.burst}>
+          {burst.bits.map((bit, i) => <ConfettiBit key={i} bit={bit} />)}
+        </View>
+      )}
+
+      {saying && (
+        <View key={saying.key} pointerEvents="none" style={styles.sayWrap}>
+          <FloatText text={saying.text} />
+        </View>
+      )}
+
       <Pressable style={styles.hit} onPress={onTap} accessibilityRole="button" accessibilityLabel="松鼠" />
     </Animated.View>
   );
@@ -524,4 +676,30 @@ const styles = StyleSheet.create({
   },
   zzz: { position: 'absolute', left: 20, top: -14, width: 33, height: 30 },
   hit: { position: 'absolute', left: ANCHOR_X - 40, bottom: FEET_Y, width: 80, height: 100, borderRadius: 40 },
+
+  // Bubble sits up-left of the head (as in the prototype), tail dots pointing at the squirrel
+  bubble: {
+    position: 'absolute', left: ANCHOR_X - 98, top: FEET_TOP - 128, width: 50, height: 50,
+    borderRadius: 25, backgroundColor: '#FFFFFF',
+    alignItems: 'center', justifyContent: 'center',
+    transformOrigin: '100% 100%',
+    shadowColor: '#462D0F', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.18, shadowRadius: 8,
+    elevation: 3,
+  },
+  bubbleDot:      { position: 'absolute', backgroundColor: '#FFFFFF', borderRadius: 5 },
+  bubbleDotBig:   { width: 10, height: 10, right: -4, bottom: -3 },
+  bubbleDotSmall: { width: 6, height: 6, right: -12, bottom: -11, borderRadius: 3 },
+  bubbleImg:      { width: 32, height: 32 },
+  bubbleQ:        { fontSize: 24, fontWeight: '700', color: '#5A4628' },
+
+  burst: { position: 'absolute', left: ANCHOR_X - 4, top: FEET_TOP - 64, width: 8, height: 8 },
+  bit:   { position: 'absolute', left: 0, top: 0, width: 8, height: 8 },
+
+  // Line is centred a little left of the feet so it stays on screen at the right-hand perches
+  sayWrap: { position: 'absolute', left: ANCHOR_X - 115, top: FEET_TOP - 136, width: 170, alignItems: 'center' },
+  say: {
+    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999,
+    backgroundColor: 'rgba(251,249,245,0.92)',
+  },
+  sayText: { fontSize: 12, fontWeight: '500', color: '#5A4628', letterSpacing: 0.4 },
 });
