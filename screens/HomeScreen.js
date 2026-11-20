@@ -528,14 +528,32 @@ export default function HomeScreen() {
   const ctaBar     = useRef(new Animated.Value(0)).current;
   const displayTemp = useCountUp(weather?.temp);
 
-  const [sqPose,     setSqPose]     = useState('idle');
-  const happyTimer = useRef(null);
-  const isFocused  = useIsFocused();
+  // ── Squirrel: perches are feet positions in the scroll content, measured with onLayout ──
+  const sqRef     = useRef(null);
+  const isFocused = useIsFocused();
+  const lay       = useRef({}).current;   // header, title, edit, editHead
+  const [perches, setPerches] = useState({});
 
-  useEffect(() => () => {
-    clearTimeout(thinkTimer.current);
-    clearTimeout(happyTimer.current);
-  }, []);
+  const recomputePerches = () => {
+    const p = {};
+    if (lay.header && lay.title) {
+      p.hero = { x: width - 75, y: lay.header.y + lay.title.y + lay.title.height - 6 };
+    }
+    if (lay.edit && lay.editHead) {
+      p.head = { x: width - 62, y: lay.edit.y + lay.editHead.y + lay.editHead.height + 16 };
+    }
+    setPerches(prev => (JSON.stringify(prev) === JSON.stringify(p) ? prev : p));
+  };
+  const onLay = (key) => (e) => { lay[key] = e.nativeEvent.layout; recomputePerches(); };
+
+  // Entrance: once the hero perch is known, hop in from the right
+  useEffect(() => {
+    if (!perches.hero) return;
+    const t = setTimeout(() => sqRef.current?.enter('hero'), 850);
+    return () => clearTimeout(t);
+  }, [!!perches.hero]);
+
+  useEffect(() => () => clearTimeout(thinkTimer.current), []);
 
   const findSavedCat = (outfitId) =>
     Object.keys(collLooks).find(cat => (collLooks[cat] ?? []).some(l => l.id === outfitId));
@@ -666,26 +684,32 @@ export default function HomeScreen() {
     ctaBar.stopAnimation();
     ctaBar.setValue(0);
     setThinking(false);
-    setSqPose('idle');
+    sqRef.current?.setPose('idle');
   };
 
-  // Short "styling" beat (≤ 800ms) with a progress bar, then deal the looks
+  // Short "styling" beat (≤ 800ms) with a progress bar, then deal the looks.
+  // The squirrel only follows along — results never wait for its hops.
   const onCtaPress = () => {
     if (thinking) return;
     const shuffle = hasResults;
     const willShow = !weatherLoading && recommendations.length > 0;
-    clearTimeout(happyTimer.current);
-    setSqPose('think');
+    // Think right where it stands — no travelling while the beat is this short
+    sqRef.current?.stop();
+    sqRef.current?.setPose('think');
     setThinking(true);
     ctaBar.setValue(0);
     Animated.timing(ctaBar, { toValue: 1, duration: THINK_MS, easing: Easing.linear, useNativeDriver: true }).start();
     thinkTimer.current = setTimeout(() => {
       if (shuffle) setSeed(s => s + 1);
-      if (willShow) {
-        setSqPose('happy');
-        happyTimer.current = setTimeout(() => setSqPose('idle'), 1500);
+      const sq = sqRef.current;
+      if (!willShow) {
+        sq?.setPose('idle');
+      } else if (sq?.isAt('head')) {
+        sq.celebrate(2);   // already beside the edit title (e.g. shuffling): celebrate on the spot
       } else {
-        setSqPose('idle');
+        sq?.setPose('idle');
+        sq?.goTo('head', { step: 44, height: 22, ms: 210 })
+          .then(arrived => { if (arrived) sqRef.current?.celebrate(2); });
       }
       ctaBar.setValue(0);
       setThinking(false);
@@ -705,15 +729,10 @@ export default function HomeScreen() {
       <ScrollView ref={scrollRef} showsVerticalScrollIndicator={false}>
 
         {/* Header */}
-        <View style={styles.header}>
-          <View>
+        <View style={styles.header} onLayout={onLay('header')}>
+          <View onLayout={onLay('title')}>
             <TitleLine style={styles.titleTop}>What to</TitleLine>
             <TitleLine style={styles.titleBottom} delay={120}>wear?</TitleLine>
-
-            {/* Mascot — stands right of the title, never takes touches */}
-            <Rise delay={260} pointerEvents="none" style={styles.heroSquirrel}>
-              <Squirrel pose={sqPose} paused={!isFocused} />
-            </Rise>
           </View>
           <Rise delay={260 + 80 * 1}>
             <Text style={styles.subtitle}>A small ritual, every morning.</Text>
@@ -781,9 +800,9 @@ export default function HomeScreen() {
         {/* 02. TODAY'S EDIT */}
         <Rise
           delay={260 + 80 * 4}
-          onLayout={(e) => { editY.current = e.nativeEvent.layout.y; }}
+          onLayout={(e) => { editY.current = e.nativeEvent.layout.y; onLay('edit')(e); }}
         >
-          <View style={[styles.section, styles.editSection]}>
+          <View style={[styles.section, styles.editSection]} onLayout={onLay('editHead')}>
             <Text style={styles.sectionLabel}>02. TODAY'S EDIT</Text>
             <Text style={styles.editSub}>
               {recommendations.length > 0
@@ -849,6 +868,9 @@ export default function HomeScreen() {
         </Rise>
 
         <View style={{ height: 32 }} />
+
+        {/* Mascot — lives in the scroll content so it scrolls with the page; never takes touches */}
+        <Squirrel ref={sqRef} perches={perches} paused={!isFocused} />
       </ScrollView>
 
       {/* Category picker bottom sheet */}
@@ -892,9 +914,7 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: BEIGE },
 
   header: { paddingHorizontal: 20, paddingTop: 22, paddingBottom: 28 },
-  titleMask: { overflow: 'hidden', paddingBottom: 4 },
-  heroSquirrel: { position: 'absolute', right: -20, bottom: 0 },
-  titleTop: {
+  titleMask: { overflow: 'hidden', paddingBottom: 4 },  titleTop: {
     fontFamily: SERIF, fontSize: 38, fontWeight: '400', color: DARK, lineHeight: 44,
   },
   titleBottom: {
