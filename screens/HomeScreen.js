@@ -15,16 +15,25 @@ import { recommendOutfits } from '../utils/outfitRecommender';
 
 const BEIGE       = '#F5EFE6';
 const DARK        = '#1A1108';
-const MUTED       = '#9E8C7A';
-const CHIP_BORDER = '#C8BAA8';
+const INK         = '#1A120B';
+const BROWN       = '#5A4628';
+const LABEL       = '#7A6650';
+const MUTED       = '#8C7758';
+const CHIP_BORDER = '#C9B9A6';
+const CHIP_ON_BG  = '#EADFCB';
 const CARD_BG     = '#EDE7DC';
+const LOOK_BG     = '#FBF9F5';
 const { width, height: SCREEN_H } = Dimensions.get('window');
-const LOOK_W      = width * 0.65;
-const LOOK_H      = LOOK_W * 1.45;
+const LOOK_W      = 228;
+const LOOK_GAP    = 14;
 const SERIF       = Platform.OS === 'ios' ? 'Georgia' : 'serif';
 const MONO        = 'JetBrainsMono_400Regular';
 
 const OCCASIONS = ['Casual', 'School', 'Work', 'Date'];
+
+const CATEGORY_LABELS = {
+  tshirts: 'Top', jackets: 'Jacket', skirts: 'Skirt', pants: 'Pants', dresses: 'Dress',
+};
 
 const getWeatherInfo = (code) => {
   if (code === 0)  return { desc: '晴天',   en: 'Sunny',        icon: 'sunny' };
@@ -210,24 +219,19 @@ const toCollItem = (item, index, total) => {
   return { id: item.id, uri: item.uri, x: xs[index] ?? 0, y: ys[index] ?? 0, scale: scales };
 };
 
-function OutfitCard({ outfit, isFavorite, onToggleFav, onAddToCalendar }) {
+function OutfitCard({ outfit, index, occasion, isFavorite, onToggleFav, onAddToCalendar }) {
   const items = outfit.items;
   const n     = items.length;
+  const categories = items
+    .map(item => CATEGORY_LABELS[item.categoryId] ?? item.label)
+    .filter(Boolean)
+    .join(' · ');
 
   return (
     <View style={styles.lookCard}>
-      {/* Top-right action buttons */}
-      <View style={styles.cardBtns}>
-        <TouchableOpacity style={styles.cardBtn} onPress={onAddToCalendar} hitSlop={8}>
-          <Ionicons name="calendar-outline" size={15} color="#888" />
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.cardBtn} onPress={onToggleFav} hitSlop={8}>
-          <Ionicons
-            name={isFavorite ? 'heart' : 'heart-outline'}
-            size={15}
-            color="#A99A8A"
-          />
-        </TouchableOpacity>
+      <View style={styles.lookHead}>
+        <Text style={styles.lookNo}>LOOK {String(index + 1).padStart(2, '0')}</Text>
+        <Text style={styles.lookNo}>{occasion.toUpperCase()}</Text>
       </View>
 
       {/* Clothing images — flex layout, never overflows */}
@@ -260,6 +264,22 @@ function OutfitCard({ outfit, isFavorite, onToggleFav, onAddToCalendar }) {
             </View>
           </>
         )}
+      </View>
+
+      <Text style={styles.lookCats}>{categories}</Text>
+      <View style={styles.lookFoot}>
+        <View style={styles.cardBtns}>
+          <TouchableOpacity style={styles.cardBtn} onPress={onAddToCalendar} hitSlop={8}>
+            <Ionicons name="calendar-outline" size={16} color={LABEL} />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.cardBtn} onPress={onToggleFav} hitSlop={8}>
+            <Ionicons
+              name={isFavorite ? 'heart' : 'heart-outline'}
+              size={16}
+              color={isFavorite ? BROWN : LABEL}
+            />
+          </TouchableOpacity>
+        </View>
       </View>
     </View>
   );
@@ -370,6 +390,8 @@ export default function HomeScreen() {
   const { looks: collLooks, addLook, removeLook }  = useCollection();
   const { saveEntry }                              = useCalendar();
   const scrollRef = useRef(null);
+  const editY     = useRef(420);
+  const [activeLook, setActiveLook] = useState(0);
 
   const findSavedCat = (outfitId) =>
     Object.keys(collLooks).find(cat => (collLooks[cat] ?? []).some(l => l.id === outfitId));
@@ -434,6 +456,17 @@ export default function HomeScreen() {
     [wardrobe, weather, selectedOcc]
   );
 
+  useEffect(() => { setActiveLook(0); }, [recommendations]);
+
+  const onLooksScrollEnd = (e) => {
+    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+    const last = recommendations.length - 1;
+    // The last card can't snap to its own offset, so treat "scrolled to the right edge" as the last page
+    const atEnd = contentOffset.x >= contentSize.width - layoutMeasurement.width - 4;
+    const i = atEnd ? last : Math.round(contentOffset.x / (LOOK_W + LOOK_GAP));
+    setActiveLook(Math.max(0, Math.min(i, last)));
+  };
+
   const totalItems = Object.values(wardrobe ?? {}).reduce(
     (sum, arr) => sum + (arr?.length ?? 0), 0
   );
@@ -477,7 +510,7 @@ export default function HomeScreen() {
   const scrollToEdit = () => {
     setShowRecs(true);
     setTimeout(() => {
-      scrollRef.current?.scrollTo({ y: 420, animated: true });
+      scrollRef.current?.scrollTo({ y: Math.max(0, editY.current - 12), animated: true });
     }, 50);
   };
 
@@ -492,25 +525,27 @@ export default function HomeScreen() {
           <Text style={styles.titleTop}>What to</Text>
           <Text style={styles.titleBottom}>wear?</Text>
           <Text style={styles.subtitle}>A small ritual, every morning.</Text>
+
+          {/* Weather — one line under the title */}
+          <View style={styles.weatherRow}>
+            {weatherLoading ? (
+              <>
+                <ActivityIndicator size="small" color={MUTED} />
+                <Text style={styles.weatherDesc}>取得天氣中…</Text>
+              </>
+            ) : (
+              <>
+                <Ionicons name={weather.icon} size={22} color="#E8A020" />
+                <Text style={styles.weatherTemp}>{weather.temp}°C</Text>
+                <Text style={styles.weatherDesc}>{weather.desc}</Text>
+              </>
+            )}
+          </View>
         </View>
 
-        {/* 01. WEATHER */}
+        {/* 01. OCCASION */}
         <View style={styles.section}>
-          <Text style={styles.sectionLabel}>01. WEATHER</Text>
-          {weatherLoading ? (
-            <ActivityIndicator size="small" color={MUTED} style={{ alignSelf: 'flex-start' }} />
-          ) : (
-            <View style={styles.weatherRow}>
-              <Ionicons name={weather.icon} size={26} color="#E8A020" />
-              <Text style={styles.weatherTemp}>{weather.temp}°</Text>
-              <Text style={styles.weatherDesc}>{weather.desc}</Text>
-            </View>
-          )}
-        </View>
-
-        {/* 02. OCCASIONS */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>02. OCCATIONS</Text>
+          <Text style={styles.sectionLabel}>01. OCCASION</Text>
           <View style={styles.chipRow}>
             {OCCASIONS.map((occ) => (
               <TouchableOpacity
@@ -525,30 +560,30 @@ export default function HomeScreen() {
               </TouchableOpacity>
             ))}
           </View>
+
+          {/* CTA */}
+          <Pressable
+            style={({ pressed }) => [styles.cta, pressed && styles.ctaPressed]}
+            onPress={scrollToEdit}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={styles.ctaMain}>What to wear today</Text>
+              <Text style={styles.ctaMeta}>
+                {weather
+                  ? `${selectedOcc}  ·  ${weather.en}  ·  ${weather.temp}°C`
+                  : selectedOcc}
+              </Text>
+            </View>
+            <Ionicons name="arrow-forward" size={22} color="#FFFFFF" />
+          </Pressable>
         </View>
 
-        {/* CTA */}
-        <Pressable
-          style={({ pressed }) => [styles.cta, pressed && styles.ctaPressed]}
-          onPress={scrollToEdit}
+        {/* 02. TODAY'S EDIT */}
+        <View
+          style={[styles.section, styles.editSection]}
+          onLayout={(e) => { editY.current = e.nativeEvent.layout.y; }}
         >
-          {({ pressed }) => (
-            <>
-              <Text style={[styles.ctaMain, pressed && styles.ctaMainPressed]}>
-                What to wear today
-              </Text>
-              {weather && (
-                <Text style={[styles.ctaMeta, pressed && styles.ctaMetaPressed]}>
-                  {selectedOcc}  ·  {weather.en}  ·  {weather.temp}°C
-                </Text>
-              )}
-            </>
-          )}
-        </Pressable>
-
-        {/* 03. TODAY'S EDIT */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>03. TODAY'S EDIT</Text>
+          <Text style={styles.sectionLabel}>02. TODAY'S EDIT</Text>
           <Text style={styles.editSub}>
             {recommendations.length > 0
               ? `${recommendations.length} looks for you`
@@ -559,44 +594,55 @@ export default function HomeScreen() {
         {/* Look cards */}
         {!showRecs ? (
           <View style={styles.emptyWrap}>
-            <Ionicons name="arrow-up-outline" size={28} color={MUTED} />
+            <Ionicons name="arrow-up-outline" size={18} color={LABEL} />
             <Text style={styles.emptyDesc}>選好場合後，點上方按鈕查看推薦搭配</Text>
           </View>
         ) : weatherLoading ? (
-          <View style={styles.loadingWrap}>
-            <ActivityIndicator size="large" color={MUTED} />
-            <Text style={styles.loadingText}>取得天氣中…</Text>
+          <View style={styles.emptyWrap}>
+            <ActivityIndicator size="small" color={LABEL} />
+            <Text style={styles.emptyDesc}>取得天氣中…</Text>
           </View>
         ) : totalItems === 0 ? (
           <View style={styles.emptyWrap}>
-            <Ionicons name="shirt-outline" size={36} color={MUTED} />
-            <Text style={styles.emptyTitle}>衣櫃還是空的</Text>
-            <Text style={styles.emptyDesc}>先到 Closet 新增衣服，才能為你推薦搭配</Text>
+            <Ionicons name="shirt-outline" size={18} color={LABEL} />
+            <Text style={styles.emptyDesc}>衣櫃還是空的，先到 Closet 新增衣服</Text>
           </View>
         ) : recommendations.length === 0 ? (
           <View style={styles.emptyWrap}>
-            <Ionicons name="cloudy-outline" size={36} color={MUTED} />
-            <Text style={styles.emptyTitle}>今天找不到適合的搭配</Text>
-            <Text style={styles.emptyDesc}>試試其他場合，或新增更多衣服</Text>
+            <Ionicons name="cloudy-outline" size={18} color={LABEL} />
+            <Text style={styles.emptyDesc}>找不到適合的搭配，試試其他場合</Text>
           </View>
         ) : (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            snapToInterval={LOOK_W + 12}
-            decelerationRate="fast"
-            contentContainerStyle={styles.looksContainer}
-          >
-            {recommendations.map((outfit) => (
-              <OutfitCard
-                key={outfit.id}
-                outfit={outfit}
-                isFavorite={isFavorited(outfit.id)}
-                onToggleFav={() => toggleFav(outfit)}
-                onAddToCalendar={() => openCalPicker(outfit)}
-              />
-            ))}
-          </ScrollView>
+          <>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              snapToInterval={LOOK_W + LOOK_GAP}
+              decelerationRate="fast"
+              onMomentumScrollEnd={onLooksScrollEnd}
+              onScrollEndDrag={onLooksScrollEnd}
+              contentContainerStyle={styles.looksContainer}
+            >
+              {recommendations.map((outfit, i) => (
+                <OutfitCard
+                  key={outfit.id}
+                  outfit={outfit}
+                  index={i}
+                  occasion={selectedOcc}
+                  isFavorite={isFavorited(outfit.id)}
+                  onToggleFav={() => toggleFav(outfit)}
+                  onAddToCalendar={() => openCalPicker(outfit)}
+                />
+              ))}
+            </ScrollView>
+            {recommendations.length > 1 && (
+              <View style={styles.pager}>
+                {recommendations.map((outfit, i) => (
+                  <View key={outfit.id} style={[styles.pagerDot, i === activeLook && styles.pagerDotOn]} />
+                ))}
+              </View>
+            )}
+          </>
         )}
 
         <View style={{ height: 32 }} />
@@ -650,88 +696,91 @@ const styles = StyleSheet.create({
     fontFamily: SERIF, fontSize: 38, fontWeight: '700', color: DARK,
     lineHeight: 44, marginBottom: 8,
   },
-  subtitle: { fontSize: 12, color: MUTED, fontStyle: 'italic' },
+  subtitle: { fontSize: 13, color: LABEL, fontStyle: 'italic' },
 
   section: { paddingHorizontal: 20, marginBottom: 22 },
+  editSection: { marginTop: 14, marginBottom: 14 },
   sectionLabel: {
-    fontSize: 10, fontWeight: '700', color: MUTED,
-    letterSpacing: 1.8, marginBottom: 12,
+    fontSize: 11, fontWeight: '800', color: LABEL,
+    letterSpacing: 3, marginBottom: 14,
   },
 
-  weatherRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  weatherTemp: { fontSize: 28, fontWeight: '600', color: DARK },
-  weatherDesc: { fontSize: 14, color: MUTED },
+  weatherRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 14 },
+  weatherTemp: { fontSize: 17, fontWeight: '600', color: DARK, fontVariant: ['tabular-nums'] },
+  weatherDesc: { fontSize: 15, color: LABEL },
 
-  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chipRow: { flexDirection: 'row', gap: 8 },
   chip: {
-    borderWidth: 1, borderColor: CHIP_BORDER,
-    borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8,
+    flex: 1, height: 40,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1.5, borderColor: CHIP_BORDER, borderRadius: 999,
   },
-  chipOn:     { backgroundColor: DARK, borderColor: DARK },
-  chipText:   { fontSize: 13, color: DARK, fontWeight: '500' },
-  chipTextOn: { color: BEIGE },
+  chipOn:     { backgroundColor: CHIP_ON_BG, borderColor: INK },
+  chipText:   { fontSize: 14, color: INK, fontWeight: '500' },
+  chipTextOn: { fontWeight: '700' },
 
   cta: {
-    marginHorizontal: 20, marginBottom: 28,
-    backgroundColor: BEIGE, borderWidth: 1.5, borderColor: DARK,
-    borderRadius: 14, paddingHorizontal: 20, paddingVertical: 18,
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    marginTop: 12,
+    backgroundColor: INK,
+    borderRadius: 22, paddingLeft: 20, paddingRight: 20, paddingTop: 17, paddingBottom: 16,
   },
-  ctaPressed: {
-    backgroundColor: DARK,
-  },
+  ctaPressed: { opacity: 0.9 },
   ctaMain: {
-    fontFamily: SERIF, fontSize: 16, fontWeight: '700',
-    color: DARK, letterSpacing: 0.2, marginBottom: 6,
+    fontFamily: SERIF, fontSize: 20, fontWeight: '700', color: '#FFFFFF',
   },
-  ctaMainPressed: { color: BEIGE },
-  ctaMeta: { fontSize: 11, color: MUTED, letterSpacing: 0.5 },
-  ctaMetaPressed: { color: 'rgba(245,239,230,0.65)' },
+  ctaMeta: { marginTop: 4, fontSize: 13, color: '#CDBFA8', letterSpacing: 0.8 },
 
-  editSub: { fontSize: 13, color: MUTED, fontStyle: 'italic', marginBottom: 14 },
+  editSub: { fontSize: 13, color: LABEL, fontStyle: 'italic', marginTop: -6 },
 
-  looksContainer: { paddingLeft: 20, paddingRight: 20, gap: 12 },
+  looksContainer: { paddingLeft: 20, paddingRight: 20, paddingTop: 6, paddingBottom: 18, gap: LOOK_GAP },
 
   lookCard: {
     width: LOOK_W,
-    height: LOOK_H,
-    borderRadius: 16,
-    overflow: 'hidden',
-    backgroundColor: CARD_BG,
+    borderRadius: 26,
+    backgroundColor: LOOK_BG,
+    borderWidth: 1, borderColor: '#E6DCCD',
+    paddingHorizontal: 14, paddingTop: 14, paddingBottom: 14,
+    shadowColor: '#46321A',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.16,
+    shadowRadius: 14,
+    elevation: 4,
   },
-  cardBtns: {
-    position: 'absolute', top: 12, right: 12, zIndex: 10,
-    flexDirection: 'row', gap: 6,
-  },
-  cardBtn: {
-    backgroundColor: 'rgba(255,255,255,0.85)',
-    borderRadius: 16, padding: 6,
-  },
+  lookHead: { flexDirection: 'row', justifyContent: 'space-between' },
+  lookNo: { fontFamily: MONO, fontSize: 10.5, letterSpacing: 1.7, color: LABEL },
   cardInner: {
-    flex: 1,
-    padding: 14,
-    paddingTop: 44,
+    height: 170,
+    marginTop: 10,
+    borderRadius: 18,
+    overflow: 'hidden',
   },
   twoCol: {
     flex: 1,
     flexDirection: 'row',
     gap: 8,
   },
-
-  loadingWrap: {
-    paddingVertical: 40, alignItems: 'center', gap: 12,
+  lookCats: { marginTop: 12, fontSize: 13, lineHeight: 18, color: LABEL, letterSpacing: 0.4 },
+  lookFoot: {
+    flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8,
   },
-  loadingText: { fontSize: 13, color: MUTED, fontStyle: 'italic' },
+  cardBtns: { flexDirection: 'row', gap: 6 },
+  cardBtn: {
+    borderWidth: 1, borderColor: '#E6DCCD',
+    borderRadius: 16, padding: 6,
+  },
+
+  pager: { flexDirection: 'row', justifyContent: 'center', gap: 6, marginTop: 2 },
+  pagerDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: CHIP_BORDER },
+  pagerDotOn: { width: 18, backgroundColor: BROWN },
 
   emptyWrap: {
-    marginHorizontal: 20, paddingVertical: 36,
-    alignItems: 'center', gap: 10,
-    borderWidth: 1.5, borderColor: '#DDD5C8',
-    borderStyle: 'dashed', borderRadius: 16,
+    marginHorizontal: 20, minHeight: 72, paddingHorizontal: 16, paddingVertical: 12,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
+    borderWidth: 1.5, borderColor: CHIP_BORDER,
+    borderStyle: 'dashed', borderRadius: 22,
   },
-  emptyTitle: {
-    fontFamily: SERIF, fontSize: 16, fontWeight: '700', color: DARK,
-  },
-  emptyDesc: { fontSize: 12, color: MUTED, textAlign: 'center', lineHeight: 18 },
+  emptyDesc: { flexShrink: 1, fontSize: 13, color: LABEL, lineHeight: 18 },
 
   sunWrap:  { position: 'absolute', top: -60, right: -60, width: 260, height: 260 },
   sunGlow:  { width: 260, height: 260, borderRadius: 130, backgroundColor: '#FFB800' },
