@@ -219,6 +219,113 @@ const toCollItem = (item, index, total) => {
   return { id: item.id, uri: item.uri, x: xs[index] ?? 0, y: ys[index] ?? 0, scale: scales };
 };
 
+// ── Motion helpers (built-in Animated, native driver, opacity/transform only) ──
+const EASE_OUT  = Easing.bezier(0.22, 1, 0.36, 1);
+const THINK_MS  = 700;   // "thinking" wait — must stay ≤ 800ms
+const DEAL_STEP = 90;    // stagger between dealt cards / garments
+
+// Fades a block in while lifting it 18px; used for the staggered entrance
+function Rise({ delay = 0, style, children, ...rest }) {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const a = Animated.timing(v, { toValue: 1, duration: 600, delay, easing: EASE_OUT, useNativeDriver: true });
+    a.start();
+    return () => a.stop();
+  }, []);
+  const translateY = v.interpolate({ inputRange: [0, 1], outputRange: [18, 0] });
+  return (
+    <Animated.View {...rest} style={[style, { opacity: v, transform: [{ translateY }] }]}>
+      {children}
+    </Animated.View>
+  );
+}
+
+// Title line that slides up from behind a clipping mask
+function TitleLine({ delay = 0, style, children }) {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const a = Animated.timing(v, { toValue: 1, duration: 900, delay, easing: EASE_OUT, useNativeDriver: true });
+    a.start();
+    return () => a.stop();
+  }, []);
+  const translateY = v.interpolate({ inputRange: [0, 1], outputRange: [52, 0] });
+  return (
+    <View style={styles.titleMask}>
+      <Animated.Text style={[style, { transform: [{ translateY }] }]}>{children}</Animated.Text>
+    </View>
+  );
+}
+
+// Counts from 0 up to target (numbers only; '--' etc. pass straight through)
+function useCountUp(target, duration = 900) {
+  const [val, setVal] = useState(typeof target === 'number' ? 0 : target);
+  useEffect(() => {
+    if (typeof target !== 'number') { setVal(target); return; }
+    const start = Date.now();
+    let raf;
+    const tick = () => {
+      const t = Math.min(1, (Date.now() - start) / duration);
+      setVal(Math.round(target * (1 - Math.pow(1 - t, 3))));
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target]);
+  return val;
+}
+
+function OccasionChip({ label, selected, onPress }) {
+  const scale   = useRef(new Animated.Value(1)).current;
+  const mounted = useRef(false);
+
+  // Pop when this chip becomes selected (skip the initial render)
+  useEffect(() => {
+    if (!mounted.current) { mounted.current = true; return; }
+    if (!selected) return;
+    scale.setValue(0.9);
+    Animated.sequence([
+      Animated.timing(scale, { toValue: 1.06, duration: 250, easing: EASE_OUT, useNativeDriver: true }),
+      Animated.timing(scale, { toValue: 1, duration: 170, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]).start();
+  }, [selected]);
+
+  const pressTo = (toValue) =>
+    Animated.timing(scale, { toValue, duration: 180, easing: EASE_OUT, useNativeDriver: true }).start();
+
+  return (
+    <Pressable
+      style={{ flex: 1 }}
+      onPress={onPress}
+      onPressIn={() => pressTo(0.93)}
+      onPressOut={() => pressTo(1)}
+    >
+      <Animated.View style={[styles.chip, selected && styles.chipOn, { transform: [{ scale }] }]}>
+        <Text style={[styles.chipText, selected && styles.chipTextOn]}>{label}</Text>
+      </Animated.View>
+    </Pressable>
+  );
+}
+
+// Garment image wrapper that pops in (scale 0.4 / -8° → rest)
+function GarmentPop({ delay, style, children }) {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const a = Animated.timing(v, {
+      toValue: 1, duration: 380, delay, easing: Easing.out(Easing.back(1.6)), useNativeDriver: true,
+    });
+    a.start();
+    return () => a.stop();
+  }, []);
+  const scale   = v.interpolate({ inputRange: [0, 1], outputRange: [0.4, 1] });
+  const rotate  = v.interpolate({ inputRange: [0, 1], outputRange: ['-8deg', '0deg'] });
+  const opacity = v.interpolate({ inputRange: [0, 0.4], outputRange: [0, 1], extrapolate: 'clamp' });
+  return (
+    <Animated.View style={[style, { opacity, transform: [{ scale }, { rotate }] }]}>
+      {children}
+    </Animated.View>
+  );
+}
+
 function OutfitCard({ outfit, index, occasion, isFavorite, onToggleFav, onAddToCalendar }) {
   const items = outfit.items;
   const n     = items.length;
@@ -227,8 +334,27 @@ function OutfitCard({ outfit, index, occasion, isFavorite, onToggleFav, onAddToC
     .filter(Boolean)
     .join(' · ');
 
+  // Deal-in: from 90px below, scale 0.6, fading in; cards staggered by DEAL_STEP
+  const delay = index * DEAL_STEP;
+  const deal  = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const a = Animated.timing(deal, {
+      toValue: 1, duration: 450, delay, easing: Easing.out(Easing.back(1.2)), useNativeDriver: true,
+    });
+    a.start();
+    return () => a.stop();
+  }, []);
+  const dealStyle = {
+    opacity:   deal.interpolate({ inputRange: [0, 0.5], outputRange: [0, 1], extrapolate: 'clamp' }),
+    transform: [
+      { translateY: deal.interpolate({ inputRange: [0, 1], outputRange: [90, 0] }) },
+      { scale:      deal.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1] }) },
+    ],
+  };
+  const garmentDelay = (j) => delay + 220 + j * DEAL_STEP;
+
   return (
-    <View style={styles.lookCard}>
+    <Animated.View style={[styles.lookCard, dealStyle]}>
       <View style={styles.lookHead}>
         <Text style={styles.lookNo}>LOOK {String(index + 1).padStart(2, '0')}</Text>
         <Text style={styles.lookNo}>{occasion.toUpperCase()}</Text>
@@ -237,31 +363,31 @@ function OutfitCard({ outfit, index, occasion, isFavorite, onToggleFav, onAddToC
       {/* Clothing images — flex layout, never overflows */}
       <View style={styles.cardInner}>
         {n === 1 && (
-          <View style={{ flex: 1 }}>
+          <GarmentPop delay={garmentDelay(0)} style={{ flex: 1 }}>
             <Image source={{ uri: items[0].uri }} style={StyleSheet.absoluteFill} resizeMode="contain" />
-          </View>
+          </GarmentPop>
         )}
         {n === 2 && (
           <View style={styles.twoCol}>
-            {items.map(item => (
-              <View key={item.id} style={{ flex: 1 }}>
+            {items.map((item, j) => (
+              <GarmentPop key={item.id} delay={garmentDelay(j)} style={{ flex: 1 }}>
                 <Image source={{ uri: item.uri }} style={StyleSheet.absoluteFill} resizeMode="contain" />
-              </View>
+              </GarmentPop>
             ))}
           </View>
         )}
         {n >= 3 && (
           <>
             <View style={[styles.twoCol, { flex: 1 }]}>
-              {[items[0], items[1]].map(item => (
-                <View key={item.id} style={{ flex: 1 }}>
+              {[items[0], items[1]].map((item, j) => (
+                <GarmentPop key={item.id} delay={garmentDelay(j)} style={{ flex: 1 }}>
                   <Image source={{ uri: item.uri }} style={StyleSheet.absoluteFill} resizeMode="contain" />
-                </View>
+                </GarmentPop>
               ))}
             </View>
-            <View style={{ flex: 0.9 }}>
+            <GarmentPop delay={garmentDelay(2)} style={{ flex: 0.9 }}>
               <Image source={{ uri: items[2].uri }} style={StyleSheet.absoluteFill} resizeMode="contain" />
-            </View>
+            </GarmentPop>
           </>
         )}
       </View>
@@ -281,7 +407,7 @@ function OutfitCard({ outfit, index, occasion, isFavorite, onToggleFav, onAddToC
           </TouchableOpacity>
         </View>
       </View>
-    </View>
+    </Animated.View>
   );
 }
 
@@ -392,6 +518,15 @@ export default function HomeScreen() {
   const scrollRef = useRef(null);
   const editY     = useRef(420);
   const [activeLook, setActiveLook] = useState(0);
+  const [seed,       setSeed]       = useState(0);   // +1 per shuffle, passed to recommendOutfits
+  const [thinking,   setThinking]   = useState(false);
+  const [dealKey,    setDealKey]    = useState(0);   // remounts cards so they deal in again
+  const thinkTimer = useRef(null);
+  const ctaScale   = useRef(new Animated.Value(1)).current;
+  const ctaBar     = useRef(new Animated.Value(0)).current;
+  const displayTemp = useCountUp(weather?.temp);
+
+  useEffect(() => () => clearTimeout(thinkTimer.current), []);
 
   const findSavedCat = (outfitId) =>
     Object.keys(collLooks).find(cat => (collLooks[cat] ?? []).some(l => l.id === outfitId));
@@ -452,8 +587,8 @@ export default function HomeScreen() {
 
   // Compute recommendations — stable: only re-runs when inputs actually change
   const recommendations = useMemo(
-    () => recommendOutfits(wardrobe, weather, selectedOcc),
-    [wardrobe, weather, selectedOcc]
+    () => recommendOutfits(wardrobe, weather, selectedOcc, seed),
+    [wardrobe, weather, selectedOcc, seed]
   );
 
   useEffect(() => { setActiveLook(0); }, [recommendations]);
@@ -514,6 +649,35 @@ export default function HomeScreen() {
     }, 50);
   };
 
+  const hasResults = showRecs && recommendations.length > 0;
+
+  const cancelThinking = () => {
+    clearTimeout(thinkTimer.current);
+    ctaBar.stopAnimation();
+    ctaBar.setValue(0);
+    setThinking(false);
+  };
+
+  // Short "styling" beat (≤ 800ms) with a progress bar, then deal the looks
+  const onCtaPress = () => {
+    if (thinking) return;
+    const shuffle = hasResults;
+    setThinking(true);
+    ctaBar.setValue(0);
+    Animated.timing(ctaBar, { toValue: 1, duration: THINK_MS, easing: Easing.linear, useNativeDriver: true }).start();
+    thinkTimer.current = setTimeout(() => {
+      if (shuffle) setSeed(s => s + 1);
+      ctaBar.setValue(0);
+      setThinking(false);
+      setActiveLook(0);
+      setDealKey(k => k + 1);
+      scrollToEdit();
+    }, THINK_MS);
+  };
+
+  const ctaPressTo = (toValue) =>
+    Animated.timing(ctaScale, { toValue, duration: 200, easing: EASE_OUT, useNativeDriver: true }).start();
+
   // ── Render ──
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -522,12 +686,14 @@ export default function HomeScreen() {
 
         {/* Header */}
         <View style={styles.header}>
-          <Text style={styles.titleTop}>What to</Text>
-          <Text style={styles.titleBottom}>wear?</Text>
-          <Text style={styles.subtitle}>A small ritual, every morning.</Text>
+          <TitleLine style={styles.titleTop}>What to</TitleLine>
+          <TitleLine style={styles.titleBottom} delay={120}>wear?</TitleLine>
+          <Rise delay={260 + 80 * 1}>
+            <Text style={styles.subtitle}>A small ritual, every morning.</Text>
+          </Rise>
 
           {/* Weather — one line under the title */}
-          <View style={styles.weatherRow}>
+          <Rise delay={260 + 80 * 2} style={styles.weatherRow}>
             {weatherLoading ? (
               <>
                 <ActivityIndicator size="small" color={MUTED} />
@@ -536,114 +702,124 @@ export default function HomeScreen() {
             ) : (
               <>
                 <Ionicons name={weather.icon} size={22} color="#E8A020" />
-                <Text style={styles.weatherTemp}>{weather.temp}°C</Text>
+                <Text style={styles.weatherTemp}>{displayTemp}°C</Text>
                 <Text style={styles.weatherDesc}>{weather.desc}</Text>
               </>
             )}
-          </View>
+          </Rise>
         </View>
 
         {/* 01. OCCASION */}
-        <View style={styles.section}>
+        <Rise delay={260 + 80 * 3} style={styles.section}>
           <Text style={styles.sectionLabel}>01. OCCASION</Text>
           <View style={styles.chipRow}>
             {OCCASIONS.map((occ) => (
-              <TouchableOpacity
+              <OccasionChip
                 key={occ}
-                style={[styles.chip, selectedOcc === occ && styles.chipOn]}
-                onPress={() => { setSelectedOcc(occ); setShowRecs(false); }}
-                activeOpacity={0.75}
-              >
-                <Text style={[styles.chipText, selectedOcc === occ && styles.chipTextOn]}>
-                  {occ}
-                </Text>
-              </TouchableOpacity>
+                label={occ}
+                selected={selectedOcc === occ}
+                onPress={() => { cancelThinking(); setSelectedOcc(occ); setShowRecs(false); }}
+              />
             ))}
           </View>
 
           {/* CTA */}
           <Pressable
-            style={({ pressed }) => [styles.cta, pressed && styles.ctaPressed]}
-            onPress={scrollToEdit}
+            onPress={onCtaPress}
+            onPressIn={() => ctaPressTo(0.975)}
+            onPressOut={() => ctaPressTo(1)}
           >
-            <View style={{ flex: 1 }}>
-              <Text style={styles.ctaMain}>What to wear today</Text>
-              <Text style={styles.ctaMeta}>
-                {weather
-                  ? `${selectedOcc}  ·  ${weather.en}  ·  ${weather.temp}°C`
-                  : selectedOcc}
-              </Text>
-            </View>
-            <Ionicons name="arrow-forward" size={22} color="#FFFFFF" />
+            <Animated.View style={[styles.cta, { transform: [{ scale: ctaScale }] }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.ctaMain}>
+                  {thinking ? 'Styling your day…' : hasResults ? 'Shuffle three more' : 'What to wear today'}
+                </Text>
+                <Text style={styles.ctaMeta}>
+                  {weather
+                    ? `${selectedOcc}  ·  ${weather.en}  ·  ${weather.temp}°C`
+                    : selectedOcc}
+                </Text>
+              </View>
+              <Ionicons
+                name={hasResults ? 'shuffle' : 'arrow-forward'}
+                size={22}
+                color="#FFFFFF"
+                style={{ opacity: thinking ? 0 : 1 }}
+              />
+              <Animated.View style={[styles.ctaBar, { transform: [{ scaleX: ctaBar }] }]} />
+            </Animated.View>
           </Pressable>
-        </View>
+        </Rise>
 
         {/* 02. TODAY'S EDIT */}
-        <View
-          style={[styles.section, styles.editSection]}
+        <Rise
+          delay={260 + 80 * 4}
           onLayout={(e) => { editY.current = e.nativeEvent.layout.y; }}
         >
-          <Text style={styles.sectionLabel}>02. TODAY'S EDIT</Text>
-          <Text style={styles.editSub}>
-            {recommendations.length > 0
-              ? `${recommendations.length} looks for you`
-              : 'Three looks for you'}
-          </Text>
-        </View>
+          <View style={[styles.section, styles.editSection]}>
+            <Text style={styles.sectionLabel}>02. TODAY'S EDIT</Text>
+            <Text style={styles.editSub}>
+              {recommendations.length > 0
+                ? `${recommendations.length} looks for you`
+                : 'Three looks for you'}
+            </Text>
+          </View>
 
-        {/* Look cards */}
-        {!showRecs ? (
-          <View style={styles.emptyWrap}>
-            <Ionicons name="arrow-up-outline" size={18} color={LABEL} />
-            <Text style={styles.emptyDesc}>選好場合後，點上方按鈕查看推薦搭配</Text>
-          </View>
-        ) : weatherLoading ? (
-          <View style={styles.emptyWrap}>
-            <ActivityIndicator size="small" color={LABEL} />
-            <Text style={styles.emptyDesc}>取得天氣中…</Text>
-          </View>
-        ) : totalItems === 0 ? (
-          <View style={styles.emptyWrap}>
-            <Ionicons name="shirt-outline" size={18} color={LABEL} />
-            <Text style={styles.emptyDesc}>衣櫃還是空的，先到 Closet 新增衣服</Text>
-          </View>
-        ) : recommendations.length === 0 ? (
-          <View style={styles.emptyWrap}>
-            <Ionicons name="cloudy-outline" size={18} color={LABEL} />
-            <Text style={styles.emptyDesc}>找不到適合的搭配，試試其他場合</Text>
-          </View>
-        ) : (
-          <>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              snapToInterval={LOOK_W + LOOK_GAP}
-              decelerationRate="fast"
-              onMomentumScrollEnd={onLooksScrollEnd}
-              onScrollEndDrag={onLooksScrollEnd}
-              contentContainerStyle={styles.looksContainer}
-            >
-              {recommendations.map((outfit, i) => (
-                <OutfitCard
-                  key={outfit.id}
-                  outfit={outfit}
-                  index={i}
-                  occasion={selectedOcc}
-                  isFavorite={isFavorited(outfit.id)}
-                  onToggleFav={() => toggleFav(outfit)}
-                  onAddToCalendar={() => openCalPicker(outfit)}
-                />
-              ))}
-            </ScrollView>
-            {recommendations.length > 1 && (
-              <View style={styles.pager}>
+          {/* Look cards */}
+          {!showRecs ? (
+            <View style={styles.emptyWrap}>
+              <Ionicons name="arrow-up-outline" size={18} color={LABEL} />
+              <Text style={styles.emptyDesc}>選好場合後，點上方按鈕查看推薦搭配</Text>
+            </View>
+          ) : weatherLoading ? (
+            <View style={styles.emptyWrap}>
+              <ActivityIndicator size="small" color={LABEL} />
+              <Text style={styles.emptyDesc}>取得天氣中…</Text>
+            </View>
+          ) : totalItems === 0 ? (
+            <View style={styles.emptyWrap}>
+              <Ionicons name="shirt-outline" size={18} color={LABEL} />
+              <Text style={styles.emptyDesc}>衣櫃還是空的，先到 Closet 新增衣服</Text>
+            </View>
+          ) : recommendations.length === 0 ? (
+            <View style={styles.emptyWrap}>
+              <Ionicons name="cloudy-outline" size={18} color={LABEL} />
+              <Text style={styles.emptyDesc}>找不到適合的搭配，試試其他場合</Text>
+            </View>
+          ) : (
+            <>
+              <ScrollView
+                key={dealKey}
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                snapToInterval={LOOK_W + LOOK_GAP}
+                decelerationRate="fast"
+                onMomentumScrollEnd={onLooksScrollEnd}
+                onScrollEndDrag={onLooksScrollEnd}
+                contentContainerStyle={styles.looksContainer}
+              >
                 {recommendations.map((outfit, i) => (
-                  <View key={outfit.id} style={[styles.pagerDot, i === activeLook && styles.pagerDotOn]} />
+                  <OutfitCard
+                    key={outfit.id}
+                    outfit={outfit}
+                    index={i}
+                    occasion={selectedOcc}
+                    isFavorite={isFavorited(outfit.id)}
+                    onToggleFav={() => toggleFav(outfit)}
+                    onAddToCalendar={() => openCalPicker(outfit)}
+                  />
                 ))}
-              </View>
-            )}
-          </>
-        )}
+              </ScrollView>
+              {recommendations.length > 1 && (
+                <View style={styles.pager}>
+                  {recommendations.map((outfit, i) => (
+                    <View key={outfit.id} style={[styles.pagerDot, i === activeLook && styles.pagerDotOn]} />
+                  ))}
+                </View>
+              )}
+            </>
+          )}
+        </Rise>
 
         <View style={{ height: 32 }} />
       </ScrollView>
@@ -689,6 +865,7 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: BEIGE },
 
   header: { paddingHorizontal: 20, paddingTop: 22, paddingBottom: 28 },
+  titleMask: { overflow: 'hidden', paddingBottom: 4 },
   titleTop: {
     fontFamily: SERIF, fontSize: 38, fontWeight: '400', color: DARK, lineHeight: 44,
   },
@@ -723,9 +900,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 12,
     marginTop: 12,
     backgroundColor: INK,
-    borderRadius: 22, paddingLeft: 20, paddingRight: 20, paddingTop: 17, paddingBottom: 16,
+    borderRadius: 22, overflow: 'hidden', paddingLeft: 20, paddingRight: 20, paddingTop: 17, paddingBottom: 16,
   },
-  ctaPressed: { opacity: 0.9 },
+  ctaBar: {
+    position: 'absolute', left: 0, right: 0, bottom: 0, height: 3,
+    backgroundColor: '#F2E4BC', transformOrigin: 'left',
+  },
   ctaMain: {
     fontFamily: SERIF, fontSize: 20, fontWeight: '700', color: '#FFFFFF',
   },
