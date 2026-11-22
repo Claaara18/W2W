@@ -1,16 +1,18 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useWardrobe } from '../context/WardrobeContext';
 import CollectionScreen from './CollectionScreen';
 import ItemTagEditor from '../components/ItemTagEditor';
+import Squirrel from '../components/Squirrel';
 import { getItemTags, TAG_STATUS } from '../utils/wardrobeSchema';
 import {
   View, Text, ScrollView, TouchableOpacity, FlatList,
   StyleSheet, Dimensions, Modal, Image, Platform, Alert,
   ActivityIndicator, TextInput, KeyboardAvoidingView,
-  TouchableWithoutFeedback, Keyboard,
+  TouchableWithoutFeedback, Keyboard, Animated,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useIsFocused } from '@react-navigation/native';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
@@ -242,9 +244,26 @@ const removeWithRemoveBg = async (uri) => {
 export default function ClosetScreen() {
   const [view, setView]             = useState('list');   // 'list' | 'detail'
   const [selCat, setSelCat]         = useState(null);
-  const [processing, setProcessing] = useState(null); // { done, total }
+  const [processing, setProcessing] = useState(null); // { total, step, uri, outcomes, finished }
   const [showCollection, setShowCollection] = useState(false);
   const { items, addItem, updateItem, updateItemTags, removeItem } = useWardrobe();
+  const isFocused  = useIsFocused();
+  const failedRef  = useRef([]);   // shown after the overlay has faded out
+
+  // Header squirrel: quiet, between the title and the heart, feet just above the divider
+  const headSqRef = useRef(null);
+  const headLay   = useRef({}).current;   // header, heart
+  const [headPerches, setHeadPerches] = useState({});
+  const onHeadLay = (key) => (e) => {
+    headLay[key] = e.nativeEvent.layout;
+    if (!headLay.header || !headLay.heart) return;
+    const p = { title: { x: headLay.heart.x - 42, y: headLay.header.height - 2 } };
+    setHeadPerches(prev => (JSON.stringify(prev) === JSON.stringify(p) ? prev : p));
+  };
+  useEffect(() => {
+    if (view !== 'list' || showCollection || !headPerches.title) return;
+    appearInPlace(headSqRef.current, 'title', () => setHeadPerches(p => ({ ...p })));
+  }, [view, showCollection, !!headPerches.title]);
 
   // Modals
   const [editModal, setEditModal] = useState(false);   // edit item
@@ -323,9 +342,10 @@ export default function ClosetScreen() {
     const baseCount = items[catId]?.length ?? 0;
     const failed = [];
     let added = 0;
-    setProcessing({ done: 0, total: uris.length });
+    setProcessing({ total: uris.length, step: 0, uri: uris[0], outcomes: [], finished: false });
     try {
       for (let i = 0; i < uris.length; i++) {
+        setProcessing(p => ({ ...p, step: i, uri: uris[i] }));
         const ts = Date.now() + i;
         let finalUri = null;
         let bgRemoved = true;
@@ -349,11 +369,20 @@ export default function ClosetScreen() {
           });
           added++;
         }
-        setProcessing({ done: i + 1, total: uris.length });
+        const outcome = finalUri && bgRemoved ? 'ok' : 'fail';
+        setProcessing(p => ({ ...p, outcomes: [...p.outcomes, outcome] }));
       }
     } finally {
-      setProcessing(null);
+      // The overlay plays its finale and fades out, then calls onProcessingHidden
+      setProcessing(p => p && { ...p, finished: true });
     }
+    failedRef.current = failed;
+  };
+
+  const onProcessingHidden = () => {
+    setProcessing(null);
+    const failed = failedRef.current;
+    failedRef.current = [];
     if (failed.length > 0) {
       setTimeout(() => Alert.alert(
         '部分照片未去背',
@@ -391,17 +420,19 @@ export default function ClosetScreen() {
   // ── ─────────────────────────────────────────────────────────
   if (view === 'list') {
     return (
-      <SafeAreaView style={styles.safe} edges={['top']}>
+      <SafeAreaView style={styles.safe} edges={['top']} onTouchStart={() => headSqRef.current?.touch('tap')}>
         {/* Header */}
-        <View style={styles.listHeader}>
+        <View style={styles.listHeader} onLayout={onHeadLay('header')}>
           <Text style={styles.pageTitle}>Closet</Text>
           <TouchableOpacity
             onPress={() => setShowCollection(true)}
             hitSlop={12}
             style={styles.collectionBtn}
+            onLayout={onHeadLay('heart')}
           >
             <Ionicons name="heart" size={26} color="#A99A8A" />
           </TouchableOpacity>
+          <Squirrel ref={headSqRef} perches={headPerches} paused={!isFocused} scale={0.6} quiet />
         </View>
         <View style={styles.divider} />
 
@@ -520,21 +551,95 @@ export default function ClosetScreen() {
       />
 
       {processing && (
-        <ProcessingOverlay text={`去背中 ${Math.min(processing.done + 1, processing.total)}/${processing.total}…`} />
+        <ProcessingOverlay processing={processing} paused={!isFocused} onHidden={onProcessingHidden} />
       )}
     </SafeAreaView>
   );
 }
 
 // ── Sub-components ────────────────────────────────────────────
-const ProcessingOverlay = ({ text = 'AI 去背中…' }) => (
-  <View style={styles.overlay}>
-    <View style={styles.overlayBox}>
-      <ActivityIndicator size="large" color={DARK} />
-      <Text style={styles.overlayText}>{text}</Text>
-    </View>
-  </View>
-);
+// The squirrel only becomes visible through enter(); freeze that hop at once and let its
+// perch-glue effect (re-run by `nudge` re-setting the perches) snap it onto the perch,
+// so it appears in place without hopping in. With reduce motion the hop resolves at once and
+// enter() goes on to its happy jump, so that is cut too on the next tick.
+const appearInPlace = (sq, name, nudge) => new Promise(resolve => {
+  if (!sq) return resolve();
+  sq.enter(name);
+  sq.stop();
+  nudge();
+  setTimeout(() => { sq.stop(); sq.setPose('idle'); resolve(); }, 0);
+});
+
+const SQ_SCALE = 0.8;
+const BUBBLE_D = 64;    // on-screen bubble diameter (pt)
+const STAGE_W  = 200;
+const STAGE_H  = 132;
+const CIRCLE_D = 260;   // round card holding the squirrel and the progress text
+
+// Background removal: a still squirrel thinks about the photo being processed, hops on each
+// success, and celebrates when all are done. Purely visual — it follows `processing` (set by
+// processAndAdd) and never delays it; only the closing ~1s finale happens after the work ends.
+const ProcessingOverlay = ({ processing, paused, onHidden }) => {
+  const { total, step, uri, outcomes, finished } = processing;
+  const sqRef  = useRef(null);
+  const fade   = useRef(new Animated.Value(0)).current;
+  const queue  = useRef([]);
+  const busy   = useRef(true);   // held until the squirrel is placed
+  const alive  = useRef(true);
+  const seen   = useRef({ step: -1, outcomes: 0, finished: false });
+  const [perches, setPerches] = useState({ stage: { x: STAGE_W / 2 + 18, y: STAGE_H - 4 } });
+
+  // Play queued squirrel beats one at a time; once the work is done, skip straight to the finale
+  const pump = async () => {
+    if (busy.current) return;
+    busy.current = true;
+    while (alive.current && queue.current.length) {
+      if (queue.current.some(e => e.type === 'done')) queue.current = [{ type: 'done' }];
+      const ev = queue.current.shift();
+      const sq = sqRef.current;
+      if (ev.type === 'think') sq?.think([ev.uri]);
+      else if (ev.type === 'ok') await sq?.celebrate(1, { haptic: false });
+      else if (ev.type === 'done') {
+        sq?.celebrate(2, { confetti: true });
+        await new Promise(r => setTimeout(r, 1000));
+        if (!alive.current) break;
+        await new Promise(r => Animated.timing(fade, { toValue: 0, duration: 260, useNativeDriver: true }).start(r));
+        if (alive.current) onHidden();
+      }
+    }
+    busy.current = false;
+  };
+
+  useEffect(() => {
+    appearInPlace(sqRef.current, 'stage', () => setPerches(p => ({ ...p })))
+      .then(() => { busy.current = false; pump(); });
+    Animated.timing(fade, { toValue: 1, duration: 200, useNativeDriver: true }).start();
+    return () => { alive.current = false; };
+  }, []);
+
+  useEffect(() => {
+    const s = seen.current;
+    for (let k = s.outcomes; k < outcomes.length; k++) {
+      if (outcomes[k] === 'ok') queue.current.push({ type: 'ok' });   // failures: no hop
+    }
+    s.outcomes = outcomes.length;
+    if (!finished && step !== s.step) { s.step = step; queue.current.push({ type: 'think', uri }); }
+    if (finished && !s.finished) { s.finished = true; queue.current.push({ type: 'done' }); }
+    pump();
+  }, [step, outcomes.length, finished]);
+
+  const shown = finished ? total : Math.min(step + 1, total);
+  return (
+    <Animated.View style={[styles.overlay, { opacity: fade }]}>
+      <View style={styles.overlayBox}>
+        <View style={styles.sqStage}>
+          <Squirrel ref={sqRef} perches={perches} paused={paused} scale={SQ_SCALE} quiet bubbleSize={BUBBLE_D / SQ_SCALE} />
+        </View>
+        <Text style={styles.overlayText}>{finished ? '完成！' : `去背中 ${shown}/${total}…`}</Text>
+      </View>
+    </Animated.View>
+  );
+};
 
 const CategoryModal = ({ visible, onClose, onSelect }) => (
   <Modal visible={visible} transparent animationType="fade">
@@ -736,12 +841,15 @@ const styles = StyleSheet.create({
     zIndex: 99,
   },
   overlayBox: {
+    width: CIRCLE_D,
+    height: CIRCLE_D,
+    borderRadius: CIRCLE_D / 2,
     backgroundColor: BEIGE,
-    borderRadius: 16,
-    padding: 28,
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 14,
   },
+  sqStage: { width: STAGE_W, height: STAGE_H },
   overlayText: {
     fontSize: 14,
     color: DARK,

@@ -7,7 +7,8 @@ import * as Haptics from 'expo-haptics';
 // parent's coordinates). Imperative API via ref: goTo(name, opts), setPose(pose), celebrate(times),
 // enter(name), stop() (freeze in place), isAt(name).
 // Props: scale (uniform size around the feet, default 1), quiet (no idle wander hops or random
-// fast tail-wags; blink, breathing and sleep still run).
+// fast tail-wags; blink, breathing and sleep still run), bubbleSize (thinking-bubble diameter in
+// the squirrel's own units; when set, the photo is cropped round to fill the bubble).
 // Built-in Animated only, native driver, opacity/transform only. Never intercepts touches.
 
 const IMG = {
@@ -134,7 +135,7 @@ function Layer({ source, style }) {
   );
 }
 
-function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, style }, ref) {
+function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, bubbleSize = null, style }, ref) {
   const [pose, setPoseState] = useState('idle');
   const fades  = useRef(Object.fromEntries(POSES.map(p => [p, new Animated.Value(p === 'idle' ? 1 : 0)]))).current;
   const breath = useRef(new Animated.Value(0)).current;
@@ -633,10 +634,19 @@ function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, styl
 
       {/* Thinking bubble — not mirrored with the body, grows from its tail */}
       {bubble && (
-        <Animated.View pointerEvents="none" style={[styles.bubble, { opacity: bubbleV, transform: [{ scale: bubbleV }] }]}>
+        <Animated.View pointerEvents="none" style={[styles.bubble, bubbleSize && {
+          // Same tail corner as the default bubble, just bigger
+          left: ANCHOR_X - 48 - bubbleSize, top: FEET_TOP - 78 - bubbleSize,
+          width: bubbleSize, height: bubbleSize, borderRadius: bubbleSize / 2,
+        }, { opacity: bubbleV, transform: [{ scale: bubbleV }] }]}>
           <View style={[styles.bubbleDot, styles.bubbleDotBig]} />
           <View style={[styles.bubbleDot, styles.bubbleDotSmall]} />
-          {bubble.uris.length > 0 ? (
+          {bubble.uris.length > 0 && bubbleSize ? (
+            // Clipped in an inner view so the bubble keeps its shadow and tail dots
+            <View style={[StyleSheet.absoluteFill, { borderRadius: bubbleSize / 2, overflow: 'hidden' }]}>
+              <Image source={{ uri: bubble.uris[bubbleIdx % bubble.uris.length] }} style={styles.img} resizeMode="cover" />
+            </View>
+          ) : bubble.uris.length > 0 ? (
             <Image source={{ uri: bubble.uris[bubbleIdx % bubble.uris.length] }} style={styles.bubbleImg} resizeMode="contain" />
           ) : (
             <Text style={styles.bubbleQ}>?</Text>
