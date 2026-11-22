@@ -2,7 +2,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View, Text, Image, ScrollView, TouchableOpacity,
   StyleSheet, Dimensions, Platform, PanResponder, Animated, Alert,
-  Modal, TouchableWithoutFeedback,
+  Modal, TouchableWithoutFeedback, Pressable, Easing,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -301,6 +301,200 @@ const dp = StyleSheet.create({
   saveTxt:  { color: '#F5EFE6', fontSize: 15, fontWeight: '700' },
 });
 
+// ── Motion ─────────────────────────────────────────────────────
+// Built-in Animated, native driver, opacity/transform only. Nothing here waits or gates input.
+const EASE_OUT = Easing.bezier(0.2, 0.8, 0.2, 1);
+const SPRING   = Easing.bezier(0.2, 1.4, 0.35, 1);
+const SOFT     = Easing.bezier(0.2, 0.7, 0.3, 1);
+const BURST_COLORS = ['#C96A6C', '#E6B4B5', '#F2E4BC', '#C9A46A'];
+
+const tween = (v, toValue, duration, opts = {}) =>
+  Animated.timing(v, { toValue, duration, easing: EASE_OUT, useNativeDriver: true, ...opts });
+// Replay a 0→1 keyframe driver from the start
+const play = (v, duration, opts) => { v.setValue(0); tween(v, 1, duration, opts).start(); };
+const kf   = (v, inputRange, outputRange) => v.interpolate({ inputRange, outputRange });
+const rand = (a, b) => a + Math.random() * (b - a);
+const riseStyle = (v) => ({ opacity: v, transform: [{ translateY: kf(v, [0, 1], [18, 0]) }] });
+
+// How a piece lands on the canvas: 'drop' from above (dice), 'add' up from the grid (tap)
+const arriveStyle = (v, kind) => kind === 'drop' ? {
+  opacity: kf(v, [0, 0.7, 1], [0, 1, 1]),
+  transform: [
+    { translateY: kf(v, [0, 0.7, 1], [-34, 4, 0]) },
+    { scaleX: kf(v, [0, 0.7, 1], [0.9, 1.04, 1]) },
+    { scaleY: kf(v, [0, 0.7, 1], [0.9, 0.96, 1]) },
+  ],
+} : kind === 'add' ? {
+  opacity: kf(v, [0, 0.25, 1], [0, 1, 1]),
+  transform: [
+    { translateY: kf(v, [0, 0.5, 0.84, 1], [70, -24, 3, 0]) },
+    { rotate: kf(v, [0, 0.5, 0.84, 1], ['0deg', '-5deg', '0deg', '0deg']) },
+    { scaleX: kf(v, [0, 0.5, 0.84, 1], [0.6, 0.9, 1.05, 1]) },
+    { scaleY: kf(v, [0, 0.5, 0.84, 1], [0.6, 0.9, 0.95, 1]) },
+  ],
+} : null;
+
+// Shrinks while pressed, like the prototype's :active
+function PressScale({ to, style, onPress, hitSlop, children }) {
+  const s = useRef(new Animated.Value(1)).current;
+  return (
+    <Pressable
+      style={style}
+      onPress={onPress}
+      hitSlop={hitSlop}
+      onPressIn={() => tween(s, to, 120).start()}
+      onPressOut={() => tween(s, 1, 200).start()}
+    >
+      <Animated.View style={{ transform: [{ scale: s }] }}>{children}</Animated.View>
+    </Pressable>
+  );
+}
+
+const ItemImage = ({ uri, sz }) => (
+  <View style={{ width: sz.w, height: sz.h }}>
+    {uri && <Image source={{ uri }} style={{ width: sz.w, height: sz.h }} resizeMode="contain" />}
+  </View>
+);
+
+// A piece that just left the canvas: falls and fades, then unmounts. Never takes touches.
+function GhostItem({ g, onDone }) {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const a = Animated.timing(v, {
+      toValue: 1, duration: 300, delay: g.delay, easing: Easing.in(Easing.ease), useNativeDriver: true,
+    });
+    a.start(({ finished }) => finished && onDone(g.key));
+    return () => a.stop();
+  }, []);
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[styles.canvasItem, {
+        left: g.x, top: g.y,
+        opacity: kf(v, [0, 1], [1, 0]),
+        transform: [
+          { translateX: kf(v, [0, 1], [g.panX, g.panX + g.dx]) },
+          { translateY: kf(v, [0, 1], [g.panY, g.panY + 40]) },
+          { rotate: kf(v, [0, 1], ['0deg', `${g.rot}deg`]) },
+          { scale: kf(v, [0, 1], [g.scale, g.scale * 0.7]) },
+        ],
+      }]}
+    >
+      <ItemImage uri={g.uri} sz={g.sz} />
+    </Animated.View>
+  );
+}
+
+// Copy of the look that shrinks into the calendar icon after saving to the diary
+function FlyToCalendar({ fly, onDone }) {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    // Short delay lets the date sheet slide away first
+    const a = tween(v, 1, 820, { delay: 280 });
+    a.start(({ finished }) => finished && onDone());
+    return () => a.stop();
+  }, []);
+  const { box, dx, dy, sc } = fly;
+  const at = [0, 0.45, 0.92, 1];
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={{
+        position: 'absolute', left: box.x, top: box.y, width: box.w, height: box.h,
+        opacity: kf(v, at, [1, 1, 1, 0]),
+        transform: [
+          { translateX: kf(v, at, [0, dx / 2, dx, dx]) },
+          { translateY: kf(v, at, [0, dy / 2 - 30, dy, dy]) },
+          { rotate: kf(v, at, ['0deg', '-6deg', '4deg', '4deg']) },
+          { scale: kf(v, at, [1, 0.45, sc, sc * 0.6]) },
+        ],
+      }}
+    >
+      {fly.items.map((it, i) => (
+        <View key={i} style={[styles.canvasItem, {
+          left: it.x, top: it.y,
+          transform: [{ translateX: it.panX }, { translateY: it.panY }, { scale: it.scale }],
+        }]}>
+          <ItemImage uri={it.uri} sz={it.sz} />
+        </View>
+      ))}
+    </Animated.View>
+  );
+}
+
+// Little confetti ring around the heart when a look is saved
+function HeartBurst({ onDone }) {
+  const v = useRef(new Animated.Value(0)).current;
+  const dirs = useRef(Array.from({ length: 10 }, (_, i) => {
+    const a = (i / 10) * Math.PI * 2, d = rand(22, 32);
+    return { x: Math.cos(a) * d, y: Math.sin(a) * d };
+  })).current;
+  useEffect(() => {
+    const a = tween(v, 1, 560, { easing: Easing.bezier(0.1, 0.7, 0.3, 1) });
+    a.start(({ finished }) => finished && onDone());
+    return () => a.stop();
+  }, []);
+  return dirs.map((d, i) => (
+    <Animated.View
+      key={i}
+      pointerEvents="none"
+      style={[styles.burstDot, {
+        backgroundColor: BURST_COLORS[i % BURST_COLORS.length],
+        opacity: kf(v, [0, 1], [1, 0]),
+        transform: [
+          { translateX: kf(v, [0, 1], [0, d.x]) },
+          { translateY: kf(v, [0, 1], [0, d.y]) },
+          { scale: kf(v, [0, 1], [1, 0.3]) },
+        ],
+      }]}
+    />
+  ));
+}
+
+function EmptyHint() {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const a = tween(v, 1, 300, { delay: 150 });
+    a.start();
+    return () => a.stop();
+  }, []);
+  return (
+    <Animated.View style={[styles.emptyCanvas, { opacity: v }]} pointerEvents="none">
+      <Text style={styles.emptyCanvasText}>點選下方衣物加入搭配</Text>
+      <Text style={styles.emptyCanvasSub}>搖晃手機或點骰子隨機穿搭</Text>
+    </Animated.View>
+  );
+}
+
+// Grid thumb: rises in (staggered) when the grid appears, shrinks while pressed
+function Tile({ item, index, onPress }) {
+  const v     = useRef(new Animated.Value(0)).current;
+  const press = useRef(new Animated.Value(1)).current;
+  const anim  = useRef({
+    opacity: v,
+    transform: [
+      { translateY: kf(v, [0, 1], [14, 0]) },
+      { scale: Animated.multiply(press, kf(v, [0, 1], [0.92, 1])) },
+    ],
+  }).current;
+  useEffect(() => {
+    const a = tween(v, 1, 450, { delay: Math.min(index, 8) * 45, easing: SPRING });
+    a.start();
+    return () => a.stop();
+  }, []);
+  return (
+    <Pressable
+      onPress={onPress}
+      onPressIn={() => tween(press, 0.94, 120).start()}
+      onPressOut={() => tween(press, 1, 200).start()}
+    >
+      <Animated.View style={[styles.thumbCell, anim]}>
+        <Image source={{ uri: item.uri }} style={styles.thumbImage} resizeMode="contain" />
+      </Animated.View>
+    </Pressable>
+  );
+}
+
 // ── Draggable item ─────────────────────────────────────────────
 function DraggableItem({ item, onRemove, onRelease }) {
   const sz         = item.sz ?? DEFAULT_SZ;
@@ -350,6 +544,19 @@ function DraggableItem({ item, onRemove, onRelease }) {
     })
   ).current;
 
+  // Arrival motion lives on an inner layer so the drag/pinch transforms stay untouched
+  const appear = useRef(new Animated.Value(item.enter ? 0 : 1)).current;
+  const arrive = useRef(arriveStyle(appear, item.enter)).current;
+  useEffect(() => {
+    if (!item.enter) return;
+    const a = Animated.timing(appear, {
+      toValue: 1, duration: item.enter === 'drop' ? 460 : 560,
+      delay: item.enterDelay ?? 0, easing: SOFT, useNativeDriver: true,
+    });
+    a.start();
+    return () => a.stop();
+  }, []);
+
   return (
     <Animated.View
       style={[
@@ -359,14 +566,12 @@ function DraggableItem({ item, onRemove, onRelease }) {
       ]}
       {...panResponder.panHandlers}
     >
-      <TouchableOpacity style={styles.removeBtn} onPress={onRemove} hitSlop={8}>
-        <Ionicons name="close-circle" size={20} color="#AAAAAA" />
-      </TouchableOpacity>
-      <View style={{ width: sz.w, height: sz.h }}>
-        {item.uri && (
-          <Image source={{ uri: item.uri }} style={{ width: sz.w, height: sz.h }} resizeMode="contain" />
-        )}
-      </View>
+      <Animated.View style={arrive}>
+        <TouchableOpacity style={styles.removeBtn} onPress={onRemove} hitSlop={8}>
+          <Ionicons name="close-circle" size={20} color="#AAAAAA" />
+        </TouchableOpacity>
+        <ItemImage uri={item.uri} sz={sz} />
+      </Animated.View>
     </Animated.View>
   );
 }
@@ -379,7 +584,92 @@ export default function MatchScreen() {
   const canvasState  = useRef({});
   const lastOutfit   = useRef([]);
   const isShaking    = useRef(false);
-  const canvasOpacity = useRef(new Animated.Value(1)).current;
+  const canvasItemsRef = useRef(canvasItems);
+  canvasItemsRef.current = canvasItems;
+
+  // ── Motion state ──
+  const enterV    = useRef([0, 1, 2].map(() => new Animated.Value(0))).current;  // header, canvas, tabs
+  const bob       = useRef(new Animated.Value(0)).current;
+  const diceSpin  = useRef(new Animated.Value(0)).current;
+  const clearSpin = useRef(new Animated.Value(0)).current;
+  const calBump   = useRef(new Animated.Value(0)).current;
+  const heartPop  = useRef(new Animated.Value(1)).current;
+  const heartNo   = useRef(new Animated.Value(1)).current;
+  const indX      = useRef(new Animated.Value(0)).current;
+  const indW      = useRef(new Animated.Value(1)).current;
+  const tabLay    = useRef({}).current;
+  const [indOn, setIndOn]       = useState(false);
+  const [enterKey, setEnterKey] = useState(0);
+  const [ghosts, setGhosts]     = useState([]);
+  const [burstKey, setBurstKey] = useState(0);
+  const [fly, setFly]           = useState(null);
+  const ghostSeq    = useRef(0);
+  const flyLayerRef = useRef(null);
+  const canvasRef   = useRef(null);
+  const calIconRef  = useRef(null);
+
+  // Page entrance each time the tab comes into focus
+  useFocusEffect(
+    useCallback(() => {
+      setEnterKey(k => k + 1);
+      enterV.forEach(v => v.setValue(0));
+      const a = Animated.sequence([
+        Animated.delay(60),
+        Animated.stagger(70, enterV.map(v => tween(v, 1, 700))),
+      ]);
+      a.start();
+      return () => a.stop();
+    }, [])
+  );
+
+  const bobCanvas = () => Animated.sequence([
+    tween(bob, -3, 55), tween(bob, 0, 55), tween(bob, -3, 55), tween(bob, 0, 55),
+  ]).start();
+
+  // Where a canvas piece currently sits (incl. drag/pinch), for ghosts and the calendar flight
+  const placed = (ci) => {
+    const s = canvasState.current[ci.id] ?? { panX: 0, panY: 0, scale: 1 };
+    return { uri: ci.uri, sz: ci.sz ?? DEFAULT_SZ, x: ci.initX, y: ci.initY, panX: s.panX, panY: s.panY, scale: s.scale };
+  };
+
+  const dropOut = (list) => {
+    if (!list.length) return;
+    const gs = list.map((ci, i) => ({
+      ...placed(ci), key: `ghost_${++ghostSeq.current}`,
+      dx: rand(-20, 20), rot: rand(-14, 14), delay: i * 50,
+    }));
+    setGhosts(prev => [...prev, ...gs]);
+  };
+  const removeGhost = (key) => setGhosts(prev => prev.filter(g => g.key !== key));
+
+  const measure = (r) => new Promise(res =>
+    r.current ? r.current.measureInWindow((x, y, w, h) => res({ x, y, w, h })) : res(null));
+
+  const flyToCalendar = async (list) => {
+    const [lo, cr, ir] = await Promise.all([measure(flyLayerRef), measure(canvasRef), measure(calIconRef)]);
+    if (!lo || !cr || !ir || !cr.w) { play(calBump, 520); return; }
+    setFly({
+      key: Date.now(), items: list,
+      box: { x: cr.x - lo.x, y: cr.y - lo.y, w: cr.w, h: cr.h },
+      dx: ir.x + ir.w / 2 - (cr.x + cr.w / 2),
+      dy: ir.y + ir.h / 2 - (cr.y + cr.h / 2),
+      sc: 34 / cr.w,
+    });
+  };
+
+  // Tab underline glides to the selected tab
+  const moveInd = (id, animate) => {
+    const l = tabLay[id];
+    if (!l) return;
+    const w = l.width - 20;               // tabBtn has 10px side padding
+    const x = l.x + 10 + w / 2 - 0.5;     // 1px bar scales around its centre
+    if (animate) {
+      Animated.parallel([tween(indX, x, 350), tween(indW, w, 350)]).start();
+    } else {
+      indX.setValue(x); indW.setValue(w); setIndOn(true);
+    }
+  };
+  useEffect(() => { moveInd(category, true); }, [category]);
 
   const { items } = useWardrobe();
   const { looks, addLook } = useCollection();
@@ -460,28 +750,25 @@ export default function MatchScreen() {
 
     try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); } catch {}
 
-    Animated.timing(canvasOpacity, {
-      toValue: 0.25, duration: 180, useNativeDriver: true,
-    }).start(() => {
-      const newOutfit = generateRandomOutfit();
+    play(diceSpin, 700);
 
-      if (newOutfit.length === 0) {
-        Animated.timing(canvasOpacity, { toValue: 1, duration: 220, useNativeDriver: true }).start();
-        Alert.alert('衣櫥太空了', '先到 Closet 新增衣服，才能搖出搭配');
-        return;
-      }
+    const newOutfit = generateRandomOutfit();
+    if (newOutfit.length === 0) {
+      Alert.alert('衣櫥太空了', '先到 Closet 新增衣服，才能搖出搭配');
+      return;
+    }
 
-      // Clear canvas state and compute smart layout
-      Object.keys(canvasState.current).forEach(k => delete canvasState.current[k]);
-      const ts   = Date.now();
-      const laid = layoutOutfit(newOutfit, canvasState.current, ts);
-      counter.current = laid.length;
-      setCanvasItems(laid);
+    // Old look falls away while the new one drops in — done in ~0.75s
+    bobCanvas();
+    dropOut(canvasItemsRef.current);
 
-      Animated.timing(canvasOpacity, {
-        toValue: 1, duration: 280, useNativeDriver: true,
-      }).start();
-    });
+    // Clear canvas state and compute smart layout
+    Object.keys(canvasState.current).forEach(k => delete canvasState.current[k]);
+    const ts   = Date.now();
+    const laid = layoutOutfit(newOutfit, canvasState.current, ts)
+      .map((it, i) => ({ ...it, enter: 'drop', enterDelay: 120 + i * 70 }));
+    counter.current = laid.length;
+    setCanvasItems(laid);
   }, [items]);
 
   // ── Accelerometer ─────────────────────────────────────────
@@ -506,6 +793,7 @@ export default function MatchScreen() {
       return { id: ci.id, uri: ci.uri, label: ci.label, x: ci.initX + s.panX, y: ci.initY + s.panY, scale: s.scale };
     });
     saveEntry(dateStr, { items: snapshot, canvasW: CANVAS_W, canvasH: CANVAS_H });
+    flyToCalendar(canvasItems.map(placed));
     const t = new Date();
     const [, m, d] = dateStr.split('-').map(Number);
     showToast(dateStr === toDateStr(t.getFullYear(), t.getMonth(), t.getDate())
@@ -520,16 +808,19 @@ export default function MatchScreen() {
     canvasState.current[id] = { panX: 0, panY: 0, scale: 1 };
     setCanvasItems(prev => {
       const pos = smartPos(categoryId, prev);
-      return [...prev, { ...item, id, categoryId, sz, initX: pos.x, initY: pos.y }];
+      return [...prev, { ...item, id, categoryId, sz, initX: pos.x, initY: pos.y, enter: 'add' }];
     });
   };
 
   const removeFromCanvas = (id) => {
+    dropOut(canvasItems.filter(i => i.id === id));
     delete canvasState.current[id];
     setCanvasItems(prev => prev.filter(i => i.id !== id));
   };
 
   const clearCanvas = () => {
+    play(clearSpin, 520);
+    dropOut(canvasItems);
     counter.current = 0;
     canvasState.current = {};
     setCanvasItems([]);
@@ -537,6 +828,7 @@ export default function MatchScreen() {
 
   const saveLook = () => {
     if (canvasItems.length === 0) {
+      play(heartNo, 400, { easing: Easing.inOut(Easing.ease) });
       showToast('先在畫布加入衣服');
       return;
     }
@@ -558,6 +850,8 @@ export default function MatchScreen() {
     });
     setCatSheetVisible(false);
     setLiked(true);
+    play(heartPop, 500);
+    setBurstKey(k => k + 1);
     showToast(`已收藏到 ${cat.name}`);
   };
 
@@ -565,26 +859,46 @@ export default function MatchScreen() {
     <SafeAreaView style={styles.safe} edges={['top']}>
 
       {/* ── Header ── */}
-      <View style={styles.header}>
+      <Animated.View style={[styles.header, riseStyle(enterV[0])]}>
         <View style={{ width: 80 }} />
         <View style={styles.headerCenter}>
           <Text style={styles.title}>Match</Text>
         </View>
         <View style={styles.headerRight}>
-          <TouchableOpacity onPress={shakeToMatch} hitSlop={8}>
-            <Ionicons name="dice-outline" size={22} color={DARK} />
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => setCalPickerVisible(true)} hitSlop={8}>
-            <Ionicons name="calendar-outline" size={20} color={DARK} />
-          </TouchableOpacity>
-          <TouchableOpacity onPress={clearCanvas} hitSlop={8}>
-            <Ionicons name="refresh-outline" size={22} color={DARK} />
-          </TouchableOpacity>
+          <PressScale to={0.82} onPress={shakeToMatch} hitSlop={8}>
+            <Animated.View style={{ transform: [
+              { rotate: kf(diceSpin, [0, 0.5, 1], ['0deg', '200deg', '360deg']) },
+              { scale: kf(diceSpin, [0, 0.5, 1], [1, 1.2, 1]) },
+            ] }}>
+              <Ionicons name="dice-outline" size={22} color={DARK} />
+            </Animated.View>
+          </PressScale>
+          <PressScale to={0.82} onPress={() => setCalPickerVisible(true)} hitSlop={8}>
+            <Animated.View ref={calIconRef} collapsable={false} style={{ transform: [
+              { scale: kf(calBump, [0, 0.4, 0.7, 1], [1, 1.35, 0.92, 1]) },
+              { rotate: kf(calBump, [0, 0.4, 0.7, 1], ['0deg', '-8deg', '0deg', '0deg']) },
+            ] }}>
+              <Ionicons name="calendar-outline" size={20} color={DARK} />
+            </Animated.View>
+          </PressScale>
+          <PressScale to={0.82} onPress={clearCanvas} hitSlop={8}>
+            <Animated.View style={{ transform: [
+              { rotate: kf(clearSpin, [0, 1], ['0deg', '-360deg']) },
+            ] }}>
+              <Ionicons name="refresh-outline" size={22} color={DARK} />
+            </Animated.View>
+          </PressScale>
         </View>
-      </View>
+      </Animated.View>
 
       {/* ── Moodboard ── */}
-      <Animated.View style={[styles.canvas, { opacity: canvasOpacity }]}>
+      <Animated.View
+        ref={canvasRef}
+        style={[styles.canvas, {
+          opacity: enterV[1],
+          transform: [{ translateY: bob }, { scale: kf(enterV[1], [0, 1], [0.96, 1]) }],
+        }]}
+      >
         <Text style={styles.moodLabel}>{moodDateStr}</Text>
         {canvasItems.map(item => (
           <DraggableItem
@@ -594,19 +908,21 @@ export default function MatchScreen() {
             onRelease={(s) => { canvasState.current[item.id] = s; }}
           />
         ))}
-        {canvasItems.length === 0 && (
-          <View style={styles.emptyCanvas}>
-            <Text style={styles.emptyCanvasText}>點選下方衣物加入搭配</Text>
-            <Text style={styles.emptyCanvasSub}>搖晃手機或點骰子隨機穿搭</Text>
-          </View>
-        )}
-        <TouchableOpacity style={styles.starBtn} activeOpacity={0.75} onPress={saveLook}>
-          <Ionicons name={liked ? 'heart' : 'heart-outline'} size={20} color={liked ? LIKED_RED : '#A99A8A'} />
-        </TouchableOpacity>
+        {ghosts.map(g => <GhostItem key={g.key} g={g} onDone={removeGhost} />)}
+        {canvasItems.length === 0 && <EmptyHint />}
+        <PressScale to={0.85} style={styles.heartWrap} onPress={saveLook}>
+          <Animated.View style={[styles.starBtn, { transform: [
+            { translateX: kf(heartNo, [0, 0.2, 0.4, 0.6, 0.8, 1], [0, -5, 5, -5, 5, 0]) },
+            { scale: kf(heartPop, [0, 0.6, 1], [0.6, 1.18, 1]) },
+          ] }]}>
+            <Ionicons name={liked ? 'heart' : 'heart-outline'} size={20} color={liked ? LIKED_RED : '#A99A8A'} />
+          </Animated.View>
+        </PressScale>
+        {burstKey > 0 && <HeartBurst key={burstKey} onDone={() => setBurstKey(0)} />}
       </Animated.View>
 
       {/* ── Category tabs ── */}
-      <View style={styles.tabsContainer}>
+      <Animated.View style={[styles.tabsContainer, riseStyle(enterV[2])]}>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -617,15 +933,23 @@ export default function MatchScreen() {
               key={cat.id}
               style={styles.tabBtn}
               onPress={() => setCategory(cat.id)}
+              onLayout={(e) => {
+                tabLay[cat.id] = e.nativeEvent.layout;
+                if (cat.id === category) moveInd(cat.id, false);
+              }}
             >
               <Text style={[styles.tabText, category === cat.id && styles.tabTextOn]}>
                 {cat.name}
               </Text>
-              {category === cat.id && <View style={styles.tabLine} />}
+              <View style={styles.tabLineSpace} />
             </TouchableOpacity>
           ))}
+          <Animated.View
+            pointerEvents="none"
+            style={[styles.tabInd, { opacity: indOn ? 1 : 0, transform: [{ translateX: indX }, { scaleX: indW }] }]}
+          />
         </ScrollView>
-      </View>
+      </Animated.View>
 
       {/* ── Clothing grid ── */}
       <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
@@ -637,21 +961,30 @@ export default function MatchScreen() {
           ) : (
             chunk(currentItems, 3).map((row, ri) => (
               <View key={ri} style={styles.gridRow}>
-                {row.map(item => (
-                  <TouchableOpacity
-                    key={item.id}
-                    style={styles.thumbCell}
+                {row.map((item, ci) => (
+                  <Tile
+                    key={`${enterKey}_${category}_${item.id}`}
+                    item={item}
+                    index={ri * 3 + ci}
                     onPress={() => addToCanvas(item, category)}
-                    activeOpacity={0.75}
-                  >
-                    <Image source={{ uri: item.uri }} style={styles.thumbImage} resizeMode="contain" />
-                  </TouchableOpacity>
+                  />
                 ))}
               </View>
             ))
           )}
         </View>
       </ScrollView>
+
+      {/* Save-to-diary flight; measured so it lines up whatever the safe-area padding */}
+      <View ref={flyLayerRef} collapsable={false} style={StyleSheet.absoluteFill} pointerEvents="none">
+        {fly && (
+          <FlyToCalendar
+            key={fly.key}
+            fly={fly}
+            onDone={() => { setFly(f => (f?.key === fly.key ? null : f)); play(calBump, 520); }}
+          />
+        )}
+      </View>
 
       <DatePickerModal
         visible={calPickerVisible}
@@ -764,7 +1097,8 @@ const styles = StyleSheet.create({
   tabBtn:   { paddingHorizontal: 10, paddingVertical: 8, alignItems: 'center' },
   tabText:  { fontFamily: MONO, fontSize: 13, color: MUTED },
   tabTextOn:{ color: DARK, fontWeight: '600' },
-  tabLine:  { height: 1.5, width: '100%', backgroundColor: DARK, marginTop: 3 },
+  tabLineSpace: { height: 1.5, marginTop: 3 },
+  tabInd:   { position: 'absolute', left: 0, bottom: 10, width: 1, height: 1.5, backgroundColor: DARK },
 
   gridWrap: { paddingHorizontal: 16, paddingTop: 4 },
   gridRow:  { flexDirection: 'row', gap: 8, marginBottom: 6 },
@@ -777,11 +1111,16 @@ const styles = StyleSheet.create({
   emptyGrid: { paddingTop: 24, alignItems: 'center' },
   emptyGridText: { fontFamily: MONO, fontSize: 11, color: '#CCBFB5', letterSpacing: 0.5 },
 
+  heartWrap: { position: 'absolute', bottom: 14, right: 14, zIndex: 20 },
   starBtn: {
-    position: 'absolute', bottom: 14, right: 14,
     width: 36, height: 36, borderRadius: 18,
     backgroundColor: 'rgba(255,255,255,0.85)',
     justifyContent: 'center', alignItems: 'center',
+  },
+
+  burstDot: {
+    position: 'absolute', right: 32 - 3.5, bottom: 32 - 3.5, zIndex: 30,
+    width: 7, height: 7, borderRadius: 3.5,
   },
 
   sheetOverlay: {
