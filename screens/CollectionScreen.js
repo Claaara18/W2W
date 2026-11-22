@@ -1,26 +1,38 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, FlatList, Image,
   StyleSheet, Dimensions, Platform, Modal, TextInput,
   KeyboardAvoidingView, TouchableWithoutFeedback, Keyboard,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, Feather } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useCollection, STYLE_CATEGORIES } from '../context/CollectionContext';
+import { useCollection } from '../context/CollectionContext';
 
-const BEIGE  = '#F2EDE8';
-const DARK   = '#1A1108';
-const MUTED  = '#9E8C7A';
+const BEIGE  = '#F3EEE5';
+const DARK   = '#1A120B';
+const MUTED  = '#8C7758';
 const BORDER = '#E5DDD4';
-const LABEL  = '#8A7F75';
+const LABEL  = '#7A6650';
+const LINE   = '#C9B9A6';
+const CARD   = '#FBF9F5';
+const CARD_LINE = '#E6DCCD';
 const SERIF  = Platform.OS === 'ios' ? 'Georgia' : 'serif';
 const MONO   = 'JetBrainsMono_400Regular';
 const { width, height } = Dimensions.get('window');
 const LOOK_W  = (width - 48 - 12) / 2;
 const CARD_H  = LOOK_W * 1.2;
-const ROW_W   = 346;
-const ROW_H   = 100;
 const LOOK_BG = ['#EDE9E4', '#E4E9ED', '#EDE4E9', '#E4EDE9', '#E9EDE4'];
+const MONTHS  = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+
+// "2 LOOKS · LATEST NOV 22" — the date only counts looks that carry savedAt
+function catSummary(catLooks) {
+  if (catLooks.length === 0) return '還沒有收藏';
+  const count = `${catLooks.length} ${catLooks.length === 1 ? 'LOOK' : 'LOOKS'}`;
+  const latest = Math.max(0, ...catLooks.map(l => (typeof l.savedAt === 'number' ? l.savedAt : 0)));
+  if (!latest) return count;
+  const d = new Date(latest);
+  return `${count} · LATEST ${MONTHS[d.getMonth()]} ${d.getDate()}`;
+}
 
 function LookCardItems({ look }) {
   const items = (look.items ?? []).filter(ci => ci.uri);
@@ -121,18 +133,39 @@ export default function CollectionScreen({ onBack } = {}) {
   const [editItem, setEditItem]   = useState(null);
   const [editLabel, setEditLabel] = useState('');
   const [previewItem, setPreviewItem] = useState(null);
+  const [addSheet, setAddSheet] = useState(false);
+  const [newName, setNewName]   = useState('');
+  const [toast, setToast]       = useState(null);
+  const toastTimer = useRef(null);
 
-  const { looks, updateLook, removeLook } = useCollection();
+  const { looks, categories, addCategory, updateLook, removeLook } = useCollection();
 
-  const totalLooks = Object.values(looks).reduce((sum, arr) => sum + arr.length, 0);
-  const lookCount  = (catId) => looks[catId]?.length ?? 0;
+  const catLooksOf = (catId) => (Array.isArray(looks[catId]) ? looks[catId] : []);
+  const totalLooks = categories.reduce((sum, c) => sum + catLooksOf(c.id).length, 0);
+
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
+  const showToast = (msg) => {
+    clearTimeout(toastTimer.current);
+    setToast(msg);
+    toastTimer.current = setTimeout(() => setToast(null), 1800);
+  };
+
+  const openAddSheet = () => { setNewName(''); setAddSheet(true); };
+  const submitNewCat = () => {
+    const name = newName.trim();
+    if (!name) return;
+    const cat = addCategory(name);
+    if (!cat) { showToast(`已經有 ${name} 了`); return; }
+    setAddSheet(false);
+    showToast(`已新增 ${cat.name}`);
+  };
 
   const openDetail = (cat) => { setSelCat(cat); setView('detail'); };
   const goBack     = ()    => { setView('list'); setSelCat(null); };
 
   const openEdit = (look) => {
     setEditItem(look);
-    setEditLabel(look.label);
+    setEditLabel(look.label ?? '');
     setEditModal(true);
   };
 
@@ -170,19 +203,76 @@ export default function CollectionScreen({ onBack } = {}) {
         </View>
         <View style={styles.divider} />
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.listContent}>
-          {STYLE_CATEGORIES.map((cat) => (
+          {categories.map((cat) => (
             <TouchableOpacity
               key={cat.id}
               style={styles.catRow}
               onPress={() => openDetail(cat)}
               activeOpacity={0.82}
             >
-              <View style={[styles.catSwatch, { backgroundColor: cat.color }]} />
-              <Text style={styles.catName}>{cat.name}</Text>
-              <Text style={styles.catCount}>{lookCount(cat.id)} looks</Text>
+              <View style={[styles.catIconBox, { backgroundColor: cat.color }]}>
+                <Feather name={cat.icon} size={24} color={DARK} />
+              </View>
+              <View style={styles.catMid}>
+                <View style={styles.catNameRow}>
+                  <Text style={styles.catName} numberOfLines={1}>{cat.name}</Text>
+                  {cat.custom && (
+                    <View style={styles.customPill}>
+                      <Text style={styles.customPillTxt}>CUSTOM</Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={styles.catMeta} numberOfLines={1}>{catSummary(catLooksOf(cat.id))}</Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={MUTED} />
             </TouchableOpacity>
           ))}
+          <TouchableOpacity style={styles.addCatBtn} onPress={openAddSheet} activeOpacity={0.75}>
+            <Feather name="plus" size={16} color={LABEL} />
+            <Text style={styles.addCatTxt}>新增類別</Text>
+          </TouchableOpacity>
         </ScrollView>
+
+        {/* ── Add-category bottom sheet ── */}
+        <Modal visible={addSheet} transparent animationType="slide" onRequestClose={() => setAddSheet(false)}>
+          <TouchableWithoutFeedback onPress={() => setAddSheet(false)}>
+            <View style={styles.modalOverlay}>
+              <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+                <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+                  <View style={styles.addSheet}>
+                    <View style={styles.sheetHandle} />
+                    <Text style={styles.sheetTitle}>新增類別</Text>
+                    <View style={styles.addRow}>
+                      <TextInput
+                        style={styles.addInput}
+                        value={newName}
+                        onChangeText={setNewName}
+                        placeholder="類別名稱，例如 Travel"
+                        placeholderTextColor={MUTED}
+                        autoFocus
+                        returnKeyType="done"
+                        onSubmitEditing={submitNewCat}
+                      />
+                      <TouchableOpacity
+                        style={[styles.addSubmit, !newName.trim() && { opacity: 0.4 }]}
+                        onPress={submitNewCat}
+                        disabled={!newName.trim()}
+                      >
+                        <Text style={styles.addSubmitTxt}>新增</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                </KeyboardAvoidingView>
+              </TouchableWithoutFeedback>
+            </View>
+          </TouchableWithoutFeedback>
+        </Modal>
+
+        {toast && (
+          <View style={styles.toastWrap} pointerEvents="none">
+            <Text style={styles.toastTxt}>{toast}</Text>
+          </View>
+        )}
       </SafeAreaView>
     );
   }
@@ -317,19 +407,54 @@ const styles = StyleSheet.create({
   totalBox: { alignItems: 'flex-end' },
   totalNum: { fontFamily: SERIF, fontSize: 20, fontWeight: '700', color: DARK, lineHeight: 22 },
   totalLabel: { fontFamily: MONO, fontSize: 8, color: MUTED, letterSpacing: 1.2 },
-  divider: { height: 1, backgroundColor: BORDER, marginHorizontal: 22, marginBottom: 10 },
+  divider: { height: 1, backgroundColor: LINE, marginHorizontal: 22, marginBottom: 10 },
 
-  listContent: { paddingTop: 14, paddingBottom: 32, gap: 20, alignItems: 'center' },
+  listContent: { paddingHorizontal: 22, paddingTop: 14, paddingBottom: 40, gap: 14 },
   catRow: {
-    width: ROW_W, height: ROW_H,
     flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#FFFFFF', borderRadius: 20, paddingHorizontal: 20,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08, shadowRadius: 4, elevation: 4,
+    backgroundColor: CARD, borderRadius: 20, borderWidth: 1, borderColor: CARD_LINE,
+    paddingHorizontal: 16, paddingVertical: 16, gap: 16,
   },
-  catSwatch: { width: 45, height: 45, borderRadius: 11, marginRight: 18 },
-  catName: { flex: 1, fontFamily: MONO, fontSize: 13, color: LABEL },
-  catCount: { fontFamily: MONO, fontSize: 11, color: LABEL },
+  catIconBox: { width: 56, height: 56, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  catMid: { flex: 1, minWidth: 0 },
+  catNameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  catName: { flexShrink: 1, fontFamily: SERIF, fontSize: 22, fontWeight: '700', color: DARK },
+  customPill: {
+    borderWidth: 1, borderColor: LINE, borderRadius: 999,
+    paddingHorizontal: 7, paddingVertical: 2,
+  },
+  customPillTxt: { fontFamily: MONO, fontSize: 8, color: LABEL, letterSpacing: 1 },
+  catMeta: { fontFamily: MONO, fontSize: 10, color: LABEL, letterSpacing: 1, marginTop: 4 },
+  addCatBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    borderWidth: 1.5, borderStyle: 'dashed', borderColor: LINE, borderRadius: 20,
+    paddingVertical: 20,
+  },
+  addCatTxt: { fontSize: 15, color: LABEL, fontWeight: '600' },
+
+  // Add-category sheet (same look as Home's "儲存到哪個類別？")
+  addSheet: {
+    backgroundColor: BEIGE, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingHorizontal: 24, paddingTop: 14, paddingBottom: 40,
+  },
+  sheetHandle: {
+    width: 40, height: 4, borderRadius: 2,
+    backgroundColor: '#C8BAA8', alignSelf: 'center', marginBottom: 18,
+  },
+  sheetTitle: { fontFamily: SERIF, fontSize: 17, fontWeight: '700', color: DARK, marginBottom: 18 },
+  addRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  addInput: {
+    flex: 1, borderWidth: 1, borderColor: LINE, borderRadius: 12,
+    paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: DARK, backgroundColor: CARD,
+  },
+  addSubmit: { backgroundColor: DARK, borderRadius: 12, paddingHorizontal: 18, paddingVertical: 13 },
+  addSubmitTxt: { fontSize: 15, color: BEIGE, fontWeight: '700' },
+
+  toastWrap: { position: 'absolute', left: 0, right: 0, bottom: 28, alignItems: 'center' },
+  toastTxt: {
+    backgroundColor: DARK, color: BEIGE, fontSize: 13, overflow: 'hidden',
+    paddingHorizontal: 16, paddingVertical: 9, borderRadius: 999,
+  },
 
   detailHeader: {
     flexDirection: 'row', alignItems: 'center',

@@ -2,14 +2,14 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Pressable, StyleSheet,
   Dimensions, Platform, ActivityIndicator, Image, Modal,
-  TouchableWithoutFeedback, Animated, Easing,
+  TouchableWithoutFeedback, Animated, Easing, TextInput, KeyboardAvoidingView,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, Feather } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useWardrobe } from '../context/WardrobeContext';
-import { useCollection, STYLE_CATEGORIES } from '../context/CollectionContext';
+import { useCollection } from '../context/CollectionContext';
 import { useCalendar } from '../context/CalendarContext';
 import { recommendOutfitsWithMeta, isSameOutfit } from '../utils/outfitRecommender';
 import { useIsFocused } from '@react-navigation/native';
@@ -527,7 +527,8 @@ export default function HomeScreen() {
   const [calPickingOutfit, setCalPickingOutfit] = useState(null);
   const [calPickerVisible, setCalPickerVisible] = useState(false);
   const { items: wardrobe }                        = useWardrobe();
-  const { looks: collLooks, addLook, removeLook }  = useCollection();
+  const { looks: collLooks, addLook, removeLook, categories, addCategory } = useCollection();
+  const [newCatName, setNewCatName] = useState('');
   const { entries, saveEntry }                     = useCalendar();
   const scrollRef = useRef(null);
   const editY     = useRef(420);
@@ -696,11 +697,27 @@ export default function HomeScreen() {
     if (!pickingOutfit) return;
     addLook(catId, {
       id: pickingOutfit.id,
-      label: `${selectedOcc} Look`,
+      label: null,
+      savedAt: Date.now(),
       bg: CARD_BG,
       items: pickingOutfit.items.map((item, i, arr) => toCollItem(item, i, arr.length)),
     });
     setPickingOutfit(null);
+    setNewCatName('');
+  };
+
+  // Save sheet: the category named like the current occasion goes first
+  const recCatId = categories.find(c => c.name.toLowerCase() === selectedOcc.toLowerCase())?.id;
+  const sheetCats = recCatId
+    ? [categories.find(c => c.id === recCatId), ...categories.filter(c => c.id !== recCatId)]
+    : categories;
+
+  // "+ 新增類別" in the sheet: create (or reuse a same-named one) and save straight into it
+  const addCatAndSave = () => {
+    const name = newCatName.trim();
+    if (!name) return;
+    const cat = categories.find(c => c.name.toLowerCase() === name.toLowerCase()) ?? addCategory(name);
+    if (cat) saveToCategory(cat.id);
   };
 
   const openCalPicker = (outfit) => {
@@ -962,27 +979,52 @@ export default function HomeScreen() {
 
       {/* Category picker bottom sheet */}
       <Modal visible={!!pickingOutfit} transparent animationType="slide">
-        <TouchableWithoutFeedback onPress={() => setPickingOutfit(null)}>
-          <View style={styles.sheetOverlay}>
+        <TouchableWithoutFeedback onPress={() => { setPickingOutfit(null); setNewCatName(''); }}>
+          <KeyboardAvoidingView style={styles.sheetOverlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
             <TouchableWithoutFeedback>
               <View style={styles.sheet}>
                 <View style={styles.sheetHandle} />
                 <Text style={styles.sheetTitle}>儲存到哪個類別？</Text>
-                {STYLE_CATEGORIES.map(cat => (
+                <ScrollView style={styles.sheetScroll} keyboardShouldPersistTaps="handled">
+                  {sheetCats.map(cat => (
+                    <TouchableOpacity
+                      key={cat.id}
+                      style={styles.sheetRow}
+                      onPress={() => saveToCategory(cat.id)}
+                      activeOpacity={0.75}
+                    >
+                      <View style={[styles.sheetSwatch, { backgroundColor: cat.color }]}>
+                        <Feather name={cat.icon} size={15} color={INK} />
+                      </View>
+                      <Text style={styles.sheetRowText} numberOfLines={1}>{cat.name}</Text>
+                      {cat.id === recCatId && (
+                        <View style={styles.sheetRecPill}><Text style={styles.sheetRecTxt}>推薦場合</Text></View>
+                      )}
+                      <Ionicons name="chevron-forward" size={16} color={MUTED} />
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+                <View style={styles.sheetAddRow}>
+                  <TextInput
+                    style={styles.sheetAddInput}
+                    value={newCatName}
+                    onChangeText={setNewCatName}
+                    placeholder="＋ 新增類別"
+                    placeholderTextColor={MUTED}
+                    returnKeyType="done"
+                    onSubmitEditing={addCatAndSave}
+                  />
                   <TouchableOpacity
-                    key={cat.id}
-                    style={styles.sheetRow}
-                    onPress={() => saveToCategory(cat.id)}
-                    activeOpacity={0.75}
+                    style={[styles.sheetAddBtn, !newCatName.trim() && { opacity: 0.4 }]}
+                    onPress={addCatAndSave}
+                    disabled={!newCatName.trim()}
                   >
-                    <View style={[styles.sheetSwatch, { backgroundColor: cat.color }]} />
-                    <Text style={styles.sheetRowText}>{cat.name}</Text>
-                    <Ionicons name="chevron-forward" size={16} color={MUTED} />
+                    <Text style={styles.sheetAddTxt}>新增</Text>
                   </TouchableOpacity>
-                ))}
+                </View>
               </View>
             </TouchableWithoutFeedback>
-          </View>
+          </KeyboardAvoidingView>
         </TouchableWithoutFeedback>
       </Modal>
 
@@ -1122,6 +1164,19 @@ const styles = StyleSheet.create({
     paddingVertical: 14, gap: 14,
     borderBottomWidth: 1, borderBottomColor: '#EDE5D8',
   },
-  sheetSwatch: { width: 28, height: 28, borderRadius: 8 },
+  sheetSwatch: { width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   sheetRowText: { flex: 1, fontSize: 15, color: DARK, fontWeight: '500' },
+  sheetScroll: { maxHeight: SCREEN_H * 0.5 },
+  sheetRecPill: {
+    borderWidth: 1, borderColor: '#C9B9A6', borderRadius: 999,
+    paddingHorizontal: 8, paddingVertical: 2,
+  },
+  sheetRecTxt: { fontSize: 10, color: '#7A6650', fontWeight: '600' },
+  sheetAddRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: 14 },
+  sheetAddInput: {
+    flex: 1, borderWidth: 1, borderColor: '#C9B9A6', borderRadius: 12,
+    paddingHorizontal: 14, paddingVertical: 11, fontSize: 15, color: DARK, backgroundColor: '#FBF9F5',
+  },
+  sheetAddBtn: { backgroundColor: DARK, borderRadius: 12, paddingHorizontal: 16, paddingVertical: 12 },
+  sheetAddTxt: { fontSize: 14, color: '#F5EFE6', fontWeight: '700' },
 });

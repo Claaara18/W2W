@@ -2,15 +2,15 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View, Text, Image, ScrollView, TouchableOpacity,
   StyleSheet, Dimensions, Platform, PanResponder, Animated, Alert,
-  Modal, TouchableWithoutFeedback, Pressable, Easing,
+  Modal, TouchableWithoutFeedback, Pressable, Easing, TextInput, KeyboardAvoidingView,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, Feather } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { Accelerometer } from 'expo-sensors';
 import * as Haptics from 'expo-haptics';
 import { useWardrobe } from '../context/WardrobeContext';
-import { useCollection, STYLE_CATEGORIES } from '../context/CollectionContext';
+import { useCollection } from '../context/CollectionContext';
 import { useCalendar } from '../context/CalendarContext';
 
 const BEIGE  = '#F2EDE8';
@@ -672,7 +672,8 @@ export default function MatchScreen() {
   useEffect(() => { moveInd(category, true); }, [category]);
 
   const { items } = useWardrobe();
-  const { looks, addLook } = useCollection();
+  const { addLook, categories, addCategory } = useCollection();
+  const [newCatName, setNewCatName] = useState('');
   const { entries, saveEntry } = useCalendar();
   const [calPickerVisible, setCalPickerVisible] = useState(false);
   const [catSheetVisible, setCatSheetVisible]   = useState(false);
@@ -842,17 +843,27 @@ export default function MatchScreen() {
     });
     addLook(cat.id, {
       id: `look_${Date.now()}`,
-      label: `${cat.name} ${(looks[cat.id]?.length ?? 0) + 1}`,
+      label: null,
+      savedAt: Date.now(),
       canvasW: CANVAS_W,
       canvasH: CANVAS_H,
       items: snapshot,
       favorite: false,
     });
     setCatSheetVisible(false);
+    setNewCatName('');
     setLiked(true);
     play(heartPop, 500);
     setBurstKey(k => k + 1);
     showToast(`已收藏到 ${cat.name}`);
+  };
+
+  // "+ 新增類別" in the sheet: create (or reuse a same-named one) and save straight into it
+  const addCatAndSave = () => {
+    const name = newCatName.trim();
+    if (!name) return;
+    const cat = categories.find(c => c.name.toLowerCase() === name.toLowerCase()) ?? addCategory(name);
+    if (cat) saveLookToCategory(cat);
   };
 
   return (
@@ -996,27 +1007,49 @@ export default function MatchScreen() {
 
       {/* Category picker bottom sheet — same look as Home's */}
       <Modal visible={catSheetVisible} transparent animationType="slide">
-        <TouchableWithoutFeedback onPress={() => setCatSheetVisible(false)}>
-          <View style={styles.sheetOverlay}>
+        <TouchableWithoutFeedback onPress={() => { setCatSheetVisible(false); setNewCatName(''); }}>
+          <KeyboardAvoidingView style={styles.sheetOverlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
             <TouchableWithoutFeedback>
               <View style={styles.sheet}>
                 <View style={styles.sheetHandle} />
                 <Text style={styles.sheetTitle}>儲存到哪個類別？</Text>
-                {STYLE_CATEGORIES.map(cat => (
+                <ScrollView style={styles.sheetScroll} keyboardShouldPersistTaps="handled">
+                  {categories.map(cat => (
+                    <TouchableOpacity
+                      key={cat.id}
+                      style={styles.sheetRow}
+                      onPress={() => saveLookToCategory(cat)}
+                      activeOpacity={0.75}
+                    >
+                      <View style={[styles.sheetSwatch, { backgroundColor: cat.color }]}>
+                        <Feather name={cat.icon} size={15} color={'#1A120B'} />
+                      </View>
+                      <Text style={styles.sheetRowText} numberOfLines={1}>{cat.name}</Text>
+                      <Ionicons name="chevron-forward" size={16} color={MUTED} />
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+                <View style={styles.sheetAddRow}>
+                  <TextInput
+                    style={styles.sheetAddInput}
+                    value={newCatName}
+                    onChangeText={setNewCatName}
+                    placeholder="＋ 新增類別"
+                    placeholderTextColor={MUTED}
+                    returnKeyType="done"
+                    onSubmitEditing={addCatAndSave}
+                  />
                   <TouchableOpacity
-                    key={cat.id}
-                    style={styles.sheetRow}
-                    onPress={() => saveLookToCategory(cat)}
-                    activeOpacity={0.75}
+                    style={[styles.sheetAddBtn, !newCatName.trim() && { opacity: 0.4 }]}
+                    onPress={addCatAndSave}
+                    disabled={!newCatName.trim()}
                   >
-                    <View style={[styles.sheetSwatch, { backgroundColor: cat.color }]} />
-                    <Text style={styles.sheetRowText}>{cat.name}</Text>
-                    <Ionicons name="chevron-forward" size={16} color={MUTED} />
+                    <Text style={styles.sheetAddTxt}>新增</Text>
                   </TouchableOpacity>
-                ))}
+                </View>
               </View>
             </TouchableWithoutFeedback>
-          </View>
+          </KeyboardAvoidingView>
         </TouchableWithoutFeedback>
       </Modal>
 
@@ -1144,8 +1177,21 @@ const styles = StyleSheet.create({
     paddingVertical: 14, gap: 14,
     borderBottomWidth: 1, borderBottomColor: '#EDE5D8',
   },
-  sheetSwatch: { width: 28, height: 28, borderRadius: 8 },
+  sheetSwatch: { width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   sheetRowText: { flex: 1, fontSize: 15, color: DARK, fontWeight: '500' },
+  sheetScroll: { maxHeight: SCREEN_H * 0.5 },
+  sheetRecPill: {
+    borderWidth: 1, borderColor: '#C9B9A6', borderRadius: 999,
+    paddingHorizontal: 8, paddingVertical: 2,
+  },
+  sheetRecTxt: { fontSize: 10, color: '#7A6650', fontWeight: '600' },
+  sheetAddRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: 14 },
+  sheetAddInput: {
+    flex: 1, borderWidth: 1, borderColor: '#C9B9A6', borderRadius: 12,
+    paddingHorizontal: 14, paddingVertical: 11, fontSize: 15, color: DARK, backgroundColor: '#FBF9F5',
+  },
+  sheetAddBtn: { backgroundColor: DARK, borderRadius: 12, paddingHorizontal: 16, paddingVertical: 12 },
+  sheetAddTxt: { fontSize: 14, color: '#F5EFE6', fontWeight: '700' },
 
   toastWrap: {
     position: 'absolute', left: 0, right: 0, bottom: 16,
