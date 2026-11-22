@@ -6,6 +6,8 @@ import * as Haptics from 'expo-haptics';
 // Layered pose images stacked in one frame, hopping between "perches" (feet positions in the
 // parent's coordinates). Imperative API via ref: goTo(name, opts), setPose(pose), celebrate(times),
 // enter(name), stop() (freeze in place), isAt(name).
+// Props: scale (uniform size around the feet, default 1), quiet (no idle wander hops or random
+// fast tail-wags; blink, breathing and sleep still run).
 // Built-in Animated only, native driver, opacity/transform only. Never intercepts touches.
 
 const IMG = {
@@ -132,7 +134,7 @@ function Layer({ source, style }) {
   );
 }
 
-function Squirrel({ perches = {}, paused = false, style }, ref) {
+function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, style }, ref) {
   const [pose, setPoseState] = useState('idle');
   const fades  = useRef(Object.fromEntries(POSES.map(p => [p, new Animated.Value(p === 'idle' ? 1 : 0)]))).current;
   const breath = useRef(new Animated.Value(0)).current;
@@ -419,14 +421,14 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
     hopTo(tx, p.y, { step: 15, height: 9, ms: 210 });
   };
 
-  // Idle life while focused: wander / wag every 2.4–4.8s, plus the sleep countdown.
-  // Leaving the tab clears both; coming back starts them again.
+  // Idle life while focused: wander / wag every 2.4–4.8s (skipped when quiet), plus the sleep
+  // countdown. Leaving the tab clears both; coming back starts them again.
   useEffect(() => {
     if (paused) { log('paused (tab out of focus)'); clearTimeout(S.sleepTimer); return; }
     armSleep('focused');
     let tickTimer, wagTimer;
     const tick = () => {
-      if (canIdle()) {
+      if (!quiet && canIdle()) {
         const r = Math.random();
         if (r < 0.5) wander();
         else if (r < 0.75) {
@@ -445,7 +447,7 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
       clearTimeout(S.sleepTimer);
       setExcited(false);
     };
-  }, [paused]);
+  }, [paused, quiet]);
 
   // Hop in from off-screen right, land on the perch, one happy jump
   const enter = async (name = 'hero') => {
@@ -553,11 +555,12 @@ function Squirrel({ perches = {}, paused = false, style }, ref) {
     // Only the body-sized hit area below takes touches; everything visual passes them through
     <Animated.View
       pointerEvents={entered ? 'box-none' : 'none'}
-      style={[styles.frame, style, {
+      style={[styles.frame, style, scale !== 1 && styles.scaled, {
         opacity: shown,
         transform: [
           { translateX: Animated.add(posX, -ANCHOR_X) },
           { translateY: Animated.add(posY, -(SQUIRREL_H - FEET_Y)) },
+          ...(scale !== 1 ? [{ scale }] : []),
         ],
       }]}
     >
@@ -666,6 +669,7 @@ const styles = StyleSheet.create({
     position: 'absolute', left: 0, top: 0, width: SQUIRREL_W, height: SQUIRREL_H,
     zIndex: 20, elevation: 20,
   },
+  scaled: { transformOrigin: `50% ${((SQUIRREL_H - FEET_Y) / SQUIRREL_H) * 100}%` },   // scale around the feet
   squash: { transformOrigin: `50% ${((SQUIRREL_H - FEET_Y) / SQUIRREL_H) * 100}%` },
   pose:   { position: 'absolute', transformOrigin: '50% 100%' },
   img:    { width: '100%', height: '100%' },

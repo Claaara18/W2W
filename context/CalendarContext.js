@@ -6,9 +6,16 @@ import { backupRawOnce } from '../utils/storageBackup';
 const STORAGE_KEY = '@w2w_calendar';
 const CalendarContext = createContext(null);
 
+const todayKey = () => {
+  const t = new Date();
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+};
+
 export function CalendarProvider({ children }) {
   const [entries, setEntries] = useState({});
   const [loaded,  setLoaded]  = useState(false);
+  // Date key of a look just saved to today; Calendar plays the stamp once, then clears it (not persisted)
+  const [pendingStamp, setPendingStamp] = useState(null);
 
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY).then(raw => {
@@ -25,8 +32,12 @@ export function CalendarProvider({ children }) {
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(entries)).catch(() => {});
   }, [entries, loaded]);
 
-  const saveEntry = (dateStr, data) =>
+  const saveEntry = (dateStr, data) => {
     setEntries(prev => ({ ...prev, [dateStr]: data }));
+    if (dateStr === todayKey()) setPendingStamp(dateStr);
+  };
+
+  const clearStamp = () => setPendingStamp(null);
 
   const removeEntry = (dateStr) =>
     setEntries(prev => {
@@ -53,7 +64,7 @@ export function CalendarProvider({ children }) {
   }, [entries, uriVersion]);
 
   return (
-    <CalendarContext.Provider value={{ entries: resolvedEntries, saveEntry, removeEntry }}>
+    <CalendarContext.Provider value={{ entries: resolvedEntries, saveEntry, removeEntry, pendingStamp, clearStamp }}>
       {children}
     </CalendarContext.Provider>
   );

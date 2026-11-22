@@ -5,10 +5,11 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useIsFocused } from '@react-navigation/native';
 import { useCalendar } from '../context/CalendarContext';
 import { useWardrobe } from '../context/WardrobeContext';
 import JournalScreen from './JournalScreen';
+import Squirrel from '../components/Squirrel';
 
 const BG       = '#F3EEE5';
 const DARK     = '#1A120B';
@@ -33,6 +34,8 @@ const CELL_W = Math.floor(CAL_W / 7);
 const CELL_H = Math.round(CELL_W * 1.3);
 const STAGE  = 116;
 const SLIDE  = 34;   // month change slide distance
+const BORDER = 1.5;  // grid line width (calWrap, header and row borders)
+const HDR_H  = 28;
 
 // Week starts Monday
 const DAY_HDRS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
@@ -178,6 +181,29 @@ function FlipNumber({ value, flipKey }) {
   );
 }
 
+// Stamp moment: today's thumbnail lands from 2.2× / -14° while a ring spreads out and fades.
+// Drawn above the grid (the cells clip), at the cell's own position; never takes touches.
+function StampOverlay({ entry, rect, v, ring }) {
+  return (
+    <View pointerEvents="none" style={[styles.stampBox, { left: rect.x, top: rect.y }]}>
+      <Animated.View style={[styles.stampRing, {
+        opacity:   ring.interpolate({ inputRange: [0, 0.1, 1], outputRange: [0, 0.9, 0] }),
+        transform: [{ scale: ring.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1.9] }) }],
+      }]} />
+      <Animated.View style={{
+        position: 'absolute', left: 0, top: 0,
+        opacity: v.interpolate({ inputRange: [0, 0.15, 1], outputRange: [0, 1, 1] }),
+        transform: [
+          { scale:  v.interpolate({ inputRange: [0, 1], outputRange: [2.2, 1] }) },
+          { rotate: v.interpolate({ inputRange: [0, 1], outputRange: ['-14deg', '0deg'] }) },
+        ],
+      }}>
+        <CellThumb entry={entry} />
+      </Animated.View>
+    </View>
+  );
+}
+
 // ── Main screen ───────────────────────────────────────────────
 export default function CalendarScreen() {
   const today = new Date();
@@ -185,9 +211,10 @@ export default function CalendarScreen() {
   const [viewYear,  setViewYear]  = useState(today.getFullYear());
   const [viewMonth, setViewMonth] = useState(today.getMonth());
   const [sel, setSel] = useState({ y: today.getFullYear(), m: today.getMonth(), d: today.getDate() });
-  const { entries, removeEntry } = useCalendar();
+  const { entries, removeEntry, pendingStamp, clearStamp } = useCalendar();
   const { items: wardrobe } = useWardrobe();
   const [journalVisible, setJournalVisible] = useState(false);
+  const isFocused = useIsFocused();
 
   // ── Animated values ──
   const titleRise = useRef(new Animated.Value(0)).current;               // entrance
@@ -283,6 +310,81 @@ export default function CalendarScreen() {
     ]);
   };
 
+  // ── Squirrel: quiet on the stats card; hops to today's cell for the stamp moment ──
+  const sqRef      = useRef(null);
+  const lay        = useRef({}).current;   // calWrap, stats (scroll content coordinates)
+  const [layVer, setLayVer]     = useState(0);
+  const [sqReady, setSqReady]   = useState(false);
+  const [stampKey, setStampKey] = useState(null);   // hides the cell's own thumb while stamping
+  const stampV   = useRef(new Animated.Value(0)).current;
+  const ringV    = useRef(new Animated.Value(0)).current;
+  const stamping = useRef(false);
+  const onLay = (key) => (e) => { lay[key] = e.nativeEvent.layout; setLayVer(v => v + 1); };
+
+  const todayKey   = keyOf(today.getFullYear(), today.getMonth(), today.getDate());
+  const viewingNow = viewYear === today.getFullYear() && viewMonth === today.getMonth();
+
+  // Today's cell rect, only while the current month is on screen
+  const todayRect = useMemo(() => {
+    if (!viewingNow || !lay.calWrap) return null;
+    const idx = startCol + today.getDate() - 1;
+    const ri = Math.floor(idx / 7), ci = idx % 7;
+    const x = lay.calWrap.x + BORDER + ci * CELL_W + (ci > 0 ? BORDER : 0);
+    const y = lay.calWrap.y + BORDER + HDR_H + BORDER + ri * (CELL_H + BORDER) + BORDER;
+    return { x, y, ri, ci };
+  }, [layVer, viewingNow, startCol]);
+
+  const perches = useMemo(() => {
+    const p = {};
+    if (lay.stats) p.card = { x: lay.stats.x + lay.stats.width - 46, y: lay.stats.y + 3 };
+    if (todayRect) p.today = { x: Math.min(todayRect.x + CELL_W + 20, width - 34), y: todayRect.y + CELL_H };
+    return p;
+  }, [layVer, todayRect]);
+
+  // Entrance once the cards have faded in
+  useEffect(() => {
+    if (!perches.card) return;
+    const t = setTimeout(() => {
+      Promise.resolve(sqRef.current?.enter('card')).finally(() => { if (mounted.current) setSqReady(true); });
+    }, 1100);
+    return () => clearTimeout(t);
+  }, [!!perches.card]);
+
+  const playStamp = async (key) => {
+    const sq = sqRef.current;
+    if (!sq) return;
+    stamping.current = true;
+    stampV.setValue(0);
+    ringV.setValue(0);
+    setStampKey(key);
+    const finish = () => {
+      stamping.current = false;
+      if (!mounted.current) return;
+      setStampKey(null);
+      clearStamp();
+    };
+    sq.touch('stamp');
+    if (!(await sq.goTo('today', { ms: 220 }))) return finish();
+    sq.setPose('acorn');
+    await new Promise(res => Animated.parallel([
+      Animated.timing(stampV, { toValue: 1, duration: 420, easing: Easing.bezier(0.3, 1.25, 0.5, 1), useNativeDriver: true }),
+      Animated.timing(ringV,  { toValue: 1, duration: 650, delay: 260, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+    ]).start(res));
+    if (!mounted.current) return finish();
+    await sq.celebrate(2, { confetti: true });
+    await sq.goTo('card');
+    finish();
+  };
+
+  // Look saved to today on Home/Match → play once when this tab is focused on the current month
+  useEffect(() => {
+    if (!pendingStamp || stamping.current) return;
+    if (pendingStamp !== todayKey || !entries[pendingStamp]) { clearStamp(); return; }
+    if (!isFocused || !sqReady || !viewingNow || !perches.today) return;
+    const t = setTimeout(() => playStamp(pendingStamp), 450);   // let the tab / month slide settle
+    return () => clearTimeout(t);
+  }, [pendingStamp, isFocused, sqReady, viewingNow, !!perches.today]);
+
   const slideStyle = { opacity: monthOp, transform: [{ translateX: monthX }] };
   const cardStyle = (i) => ({
     opacity: cardsIn[i],
@@ -290,10 +392,11 @@ export default function CalendarScreen() {
   });
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
+    <SafeAreaView style={styles.safe} edges={['top']} onTouchStart={() => sqRef.current?.touch('tap')}>
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.scroll}
+        onScrollBeginDrag={() => sqRef.current?.touch('scroll')}
       >
 
         {/* ── Month name + nav ── */}
@@ -339,7 +442,7 @@ export default function CalendarScreen() {
         />
 
         {/* ── Calendar grid ── */}
-        <View style={styles.calWrap}>
+        <View style={styles.calWrap} onLayout={onLay('calWrap')}>
           {/* Day headers */}
           <View style={styles.hdrRow}>
             {DAY_HDRS.map((d, i) => (
@@ -376,7 +479,7 @@ export default function CalendarScreen() {
                         disabled={!day}
                         onPress={() => setSel({ y: viewYear, m: viewMonth, d: day })}
                       >
-                        {entry && <CellThumb entry={entry} />}
+                        {entry && key !== stampKey && <CellThumb entry={entry} />}
                         <Text style={[styles.dayNum, tod && styles.todayNum]}>
                           {day ?? ''}
                         </Text>
@@ -391,7 +494,7 @@ export default function CalendarScreen() {
         </View>
 
         {/* ── Stats card ── */}
-        <Animated.View style={[styles.card, cardStyle(0)]}>
+        <Animated.View style={[styles.card, styles.statsCard, cardStyle(0)]} onLayout={onLay('stats')}>
           <Text style={styles.mono}>THIS MONTH</Text>
           <View style={styles.statsRow}>
             <FlipNumber value={monthLooks} flipKey={`${viewYear}-${viewMonth}-${monthLooks}`} />
@@ -440,6 +543,13 @@ export default function CalendarScreen() {
         </Animated.View>
 
         <View style={{ height: 36 }} />
+
+        {stampKey && todayRect && entries[stampKey] && (
+          <StampOverlay entry={entries[stampKey]} rect={todayRect} v={stampV} ring={ringV} />
+        )}
+
+        {/* Mascot — lives in the scroll content so it scrolls with the page; only its body takes taps */}
+        <Squirrel ref={sqRef} perches={perches} paused={!isFocused} scale={0.7} quiet />
       </ScrollView>
     </SafeAreaView>
   );
@@ -517,7 +627,8 @@ const styles = StyleSheet.create({
   },
   mono: { fontFamily: MONO, fontSize: 10.5, color: LABEL, letterSpacing: 2 },
 
-  // Stats card
+  // Stats card — extra top room for the squirrel sitting on its edge
+  statsCard: { marginTop: 22 },
   statsRow:  { flexDirection: 'row', alignItems: 'baseline', gap: 8, marginTop: 10 },
   statsNum:  { fontFamily: SERIF, fontSize: 50, fontWeight: '700', color: DARK, lineHeight: 56 },
   statsUnit: { fontFamily: SERIF, fontSize: 24, color: DARK },
@@ -544,4 +655,12 @@ const styles = StyleSheet.create({
     backgroundColor: DARK, justifyContent: 'center', alignItems: 'center',
   },
   goTxt:     { color: '#FFFFFF', fontSize: 13.5, fontWeight: '600' },
+
+  // Stamp moment
+  stampBox:  { position: 'absolute', width: CELL_W, height: CELL_H, zIndex: 10, elevation: 10 },
+  stampRing: {
+    position: 'absolute', left: (CELL_W - CELL_W * 1.1) / 2, top: (CELL_H - CELL_W * 1.1) / 2,
+    width: CELL_W * 1.1, height: CELL_W * 1.1, borderRadius: CELL_W * 0.55,
+    borderWidth: 2, borderColor: BROWN,
+  },
 });
