@@ -418,11 +418,20 @@ const CAL_MONTHS = ['January','February','March','April','May','June',
   'July','August','September','October','November','December'];
 const CAL_DAYS   = ['S','M','T','W','T','F','S'];
 
-function CalendarPickerModal({ visible, onClose, onSave }) {
+function CalendarPickerModal({ visible, onClose, onSave, entries }) {
   const now = new Date();
   const [year,   setYear]   = useState(now.getFullYear());
   const [month,  setMonth]  = useState(now.getMonth());
-  const [selDay, setSelDay] = useState(null);
+  const [selDay, setSelDay] = useState(now.getDate());
+
+  // Default to today every time the picker opens
+  useEffect(() => {
+    if (!visible) return;
+    const t = new Date();
+    setYear(t.getFullYear());
+    setMonth(t.getMonth());
+    setSelDay(t.getDate());
+  }, [visible]);
 
   const firstDay    = new Date(year, month, 1).getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -433,9 +442,12 @@ function CalendarPickerModal({ visible, onClose, onSave }) {
   const prev = () => { if (month === 0) { setYear(y => y-1); setMonth(11); } else setMonth(m => m-1); setSelDay(null); };
   const next = () => { if (month === 11) { setYear(y => y+1); setMonth(0); } else setMonth(m => m+1); setSelDay(null); };
 
+  const selStr   = selDay ? `${year}-${String(month+1).padStart(2,'0')}-${String(selDay).padStart(2,'0')}` : null;
+  const hasEntry = !!(selStr && entries?.[selStr]);
+
   const handleSave = () => {
     if (!selDay) return;
-    onSave(`${year}-${String(month+1).padStart(2,'0')}-${String(selDay).padStart(2,'0')}`);
+    onSave(selStr);
     setSelDay(null);
   };
 
@@ -476,7 +488,7 @@ function CalendarPickerModal({ visible, onClose, onSave }) {
               </View>
               <TouchableOpacity style={[cpStyles.saveBtn, !selDay && { opacity: 0.35 }]}
                 onPress={handleSave} disabled={!selDay}>
-                <Text style={cpStyles.saveTxt}>儲存到這天</Text>
+                <Text style={cpStyles.saveTxt}>{hasEntry ? '取代這天的穿搭' : '儲存到這天'}</Text>
               </TouchableOpacity>
             </View>
           </TouchableWithoutFeedback>
@@ -516,7 +528,7 @@ export default function HomeScreen() {
   const [calPickerVisible, setCalPickerVisible] = useState(false);
   const { items: wardrobe }                        = useWardrobe();
   const { looks: collLooks, addLook, removeLook }  = useCollection();
-  const { saveEntry }                              = useCalendar();
+  const { entries, saveEntry }                     = useCalendar();
   const scrollRef = useRef(null);
   const editY     = useRef(420);
   const [activeLook, setActiveLook] = useState(0);
@@ -703,7 +715,10 @@ export default function HomeScreen() {
     if (!willSave) return;
     sqRef.current?.touch('tap');   // taps inside the Modal don't reach the screen's onTouchStart
     sqRef.current?.celebrate(2, { pose: 'acorn' });
-    sqRef.current?.say('今天也穿得很好');
+    const t = new Date();
+    const todayStr = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
+    const [, m, d] = dateStr.split('-').map(Number);
+    sqRef.current?.say(dateStr === todayStr ? '今天也穿得很好' : `已存到 ${m}/${d} 的日記`);
   };
 
   const saveOutfitToCalendar = (dateStr) => {
@@ -976,6 +991,7 @@ export default function HomeScreen() {
         visible={calPickerVisible}
         onClose={() => { setCalPickerVisible(false); setCalPickingOutfit(null); }}
         onSave={onCalendarSave}
+        entries={entries}
       />
 
     </SafeAreaView>
