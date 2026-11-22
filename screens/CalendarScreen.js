@@ -227,6 +227,7 @@ export default function CalendarScreen() {
   const running   = useRef([]);
 
   useEffect(() => {
+    mounted.current = true;   // cleanup sets false; Fast Refresh / StrictMode re-run the effect
     const entrance = Animated.parallel([
       Animated.timing(titleRise, { toValue: 1, duration: 750, delay: 200, easing: EASE_OUT, useNativeDriver: true }),
       ...cellsIn.map((v, i) =>

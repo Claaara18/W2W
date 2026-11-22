@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View, Text, Image, ScrollView, TouchableOpacity,
   StyleSheet, Dimensions, Platform, PanResponder, Animated, Alert,
@@ -18,6 +18,7 @@ const DARK   = '#1A1108';
 const MUTED  = '#9E8C7A';
 const SERIF  = Platform.OS === 'ios' ? 'Georgia' : 'serif';
 const MONO   = 'JetBrainsMono_400Regular';
+const LIKED_RED = '#E0524A';
 const { width } = Dimensions.get('window');
 const { height: SCREEN_H } = Dimensions.get('window');
 
@@ -198,11 +199,23 @@ const MONTHS_SHORT = ['JAN','FEB','MAR','APR','MAY','JUN',
   'JUL','AUG','SEP','OCT','NOV','DEC'];
 const DAY_COL = ['S','M','T','W','T','F','S'];
 
-function DatePickerModal({ visible, onClose, onSave }) {
+const toDateStr = (y, m, d) =>
+  `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+
+function DatePickerModal({ visible, onClose, onSave, entries, canvasEmpty }) {
   const now = new Date();
   const [year, setYear]     = useState(now.getFullYear());
   const [month, setMonth]   = useState(now.getMonth());
-  const [selDay, setSelDay] = useState(null);
+  const [selDay, setSelDay] = useState(now.getDate());
+
+  // Default to today every time the picker opens
+  useEffect(() => {
+    if (!visible) return;
+    const t = new Date();
+    setYear(t.getFullYear());
+    setMonth(t.getMonth());
+    setSelDay(t.getDate());
+  }, [visible]);
 
   const firstDay    = new Date(year, month, 1).getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -213,10 +226,16 @@ function DatePickerModal({ visible, onClose, onSave }) {
   const nextMonth = () => { if (month === 11) { setYear(y => y+1); setMonth(0); } else setMonth(m => m+1); setSelDay(null); };
   const isToday   = (d) => d === now.getDate() && month === now.getMonth() && year === now.getFullYear();
 
+  const selStr   = selDay ? toDateStr(year, month, selDay) : null;
+  const hasEntry = !!(selStr && entries?.[selStr]);
+  const disabled = !selDay || canvasEmpty;
+  const btnLabel = canvasEmpty ? '先在畫布加入衣服'
+                 : hasEntry    ? '取代這天的穿搭'
+                 :               '儲存到這天';
+
   const handleSave = () => {
-    if (!selDay) return;
-    const str = `${year}-${String(month+1).padStart(2,'0')}-${String(selDay).padStart(2,'0')}`;
-    onSave(str);
+    if (disabled) return;
+    onSave(selStr);
     onClose();
   };
 
@@ -252,9 +271,9 @@ function DatePickerModal({ visible, onClose, onSave }) {
                   );
                 })}
               </View>
-              <TouchableOpacity style={[dp.saveBtn, !selDay && { opacity: 0.35 }]}
-                onPress={handleSave} disabled={!selDay}>
-                <Text style={dp.saveTxt}>儲存到這天</Text>
+              <TouchableOpacity style={[dp.saveBtn, disabled && { opacity: 0.35 }]}
+                onPress={handleSave} disabled={disabled}>
+                <Text style={dp.saveTxt}>{btnLabel}</Text>
               </TouchableOpacity>
             </View>
           </TouchableWithoutFeedback>
@@ -364,8 +383,22 @@ export default function MatchScreen() {
 
   const { items } = useWardrobe();
   const { looks, addLook } = useCollection();
-  const { saveEntry } = useCalendar();
+  const { entries, saveEntry } = useCalendar();
   const [calPickerVisible, setCalPickerVisible] = useState(false);
+  const [catSheetVisible, setCatSheetVisible]   = useState(false);
+  const [liked, setLiked] = useState(false);
+  const [toast, setToast] = useState(null);
+  const toastTimer = useRef(null);
+
+  const showToast = (msg) => {
+    clearTimeout(toastTimer.current);
+    setToast(msg);
+    toastTimer.current = setTimeout(() => setToast(null), 2000);
+  };
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
+
+  // Any change to what's on the canvas makes it a new, unsaved look
+  useEffect(() => { setLiked(false); }, [canvasItems]);
   const currentItems = items[category] ?? [];
 
   const now = new Date();
@@ -467,16 +500,17 @@ export default function MatchScreen() {
 
   // ── Canvas helpers ────────────────────────────────────────
   const saveToCalendar = (dateStr) => {
-    if (canvasItems.length === 0) {
-      Alert.alert('搭配板是空的', '先加入衣服再儲存到日曆');
-      return;
-    }
+    if (canvasItems.length === 0) return;
     const snapshot = canvasItems.map(ci => {
       const s = canvasState.current[ci.id] ?? { panX: 0, panY: 0, scale: 1 };
       return { id: ci.id, uri: ci.uri, label: ci.label, x: ci.initX + s.panX, y: ci.initY + s.panY, scale: s.scale };
     });
     saveEntry(dateStr, { items: snapshot, canvasW: CANVAS_W, canvasH: CANVAS_H });
-    Alert.alert('已儲存', `穿搭已記錄到 ${dateStr} ✓`);
+    const t = new Date();
+    const [, m, d] = dateStr.split('-').map(Number);
+    showToast(dateStr === toDateStr(t.getFullYear(), t.getMonth(), t.getDate())
+      ? '已存到今天的日記'
+      : `已存到 ${m}/${d} 的日記`);
   };
 
   const addToCanvas = (item, categoryId) => {
@@ -503,34 +537,28 @@ export default function MatchScreen() {
 
   const saveLook = () => {
     if (canvasItems.length === 0) {
-      Alert.alert('搭配板是空的', '先加入衣服再收藏');
+      showToast('先在畫布加入衣服');
       return;
     }
+    setCatSheetVisible(true);
+  };
+
+  const saveLookToCategory = (cat) => {
     const snapshot = canvasItems.map(ci => {
       const s = canvasState.current[ci.id] ?? { panX: 0, panY: 0, scale: 1 };
       return { id: ci.id, uri: ci.uri, label: ci.label, x: ci.initX + s.panX, y: ci.initY + s.panY, scale: s.scale };
     });
-    Alert.alert(
-      '收藏到哪個標籤？',
-      undefined,
-      [
-        ...STYLE_CATEGORIES.map(cat => ({
-          text: cat.name,
-          onPress: () => {
-            addLook(cat.id, {
-              id: `look_${Date.now()}`,
-              label: `${cat.name} ${(looks[cat.id]?.length ?? 0) + 1}`,
-              canvasW: CANVAS_W,
-              canvasH: CANVAS_H,
-              items: snapshot,
-              favorite: false,
-            });
-            Alert.alert('已收藏', `已加入 ${cat.name} ✓`);
-          },
-        })),
-        { text: '取消', style: 'cancel' },
-      ]
-    );
+    addLook(cat.id, {
+      id: `look_${Date.now()}`,
+      label: `${cat.name} ${(looks[cat.id]?.length ?? 0) + 1}`,
+      canvasW: CANVAS_W,
+      canvasH: CANVAS_H,
+      items: snapshot,
+      favorite: false,
+    });
+    setCatSheetVisible(false);
+    setLiked(true);
+    showToast(`已收藏到 ${cat.name}`);
   };
 
   return (
@@ -573,7 +601,7 @@ export default function MatchScreen() {
           </View>
         )}
         <TouchableOpacity style={styles.starBtn} activeOpacity={0.75} onPress={saveLook}>
-          <Ionicons name="heart-outline" size={20} color="#A99A8A" />
+          <Ionicons name={liked ? 'heart' : 'heart-outline'} size={20} color={liked ? LIKED_RED : '#A99A8A'} />
         </TouchableOpacity>
       </Animated.View>
 
@@ -629,7 +657,44 @@ export default function MatchScreen() {
         visible={calPickerVisible}
         onClose={() => setCalPickerVisible(false)}
         onSave={saveToCalendar}
+        entries={entries}
+        canvasEmpty={canvasItems.length === 0}
       />
+
+      {/* Category picker bottom sheet — same look as Home's */}
+      <Modal visible={catSheetVisible} transparent animationType="slide">
+        <TouchableWithoutFeedback onPress={() => setCatSheetVisible(false)}>
+          <View style={styles.sheetOverlay}>
+            <TouchableWithoutFeedback>
+              <View style={styles.sheet}>
+                <View style={styles.sheetHandle} />
+                <Text style={styles.sheetTitle}>儲存到哪個類別？</Text>
+                {STYLE_CATEGORIES.map(cat => (
+                  <TouchableOpacity
+                    key={cat.id}
+                    style={styles.sheetRow}
+                    onPress={() => saveLookToCategory(cat)}
+                    activeOpacity={0.75}
+                  >
+                    <View style={[styles.sheetSwatch, { backgroundColor: cat.color }]} />
+                    <Text style={styles.sheetRowText}>{cat.name}</Text>
+                    <Ionicons name="chevron-forward" size={16} color={MUTED} />
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </TouchableWithoutFeedback>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
+
+      {/* Toast — dark pill just above the tab bar */}
+      {toast && (
+        <View style={styles.toastWrap} pointerEvents="none">
+          <View style={styles.toast}>
+            <Text style={styles.toastText}>{toast}</Text>
+          </View>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -718,4 +783,39 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.85)',
     justifyContent: 'center', alignItems: 'center',
   },
+
+  sheetOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', justifyContent: 'flex-end',
+  },
+  sheet: {
+    backgroundColor: '#F5EFE6',
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingHorizontal: 24, paddingTop: 14, paddingBottom: 40,
+  },
+  sheetHandle: {
+    width: 40, height: 4, borderRadius: 2,
+    backgroundColor: '#C8BAA8', alignSelf: 'center', marginBottom: 18,
+  },
+  sheetTitle: {
+    fontFamily: SERIF, fontSize: 17, fontWeight: '700', color: DARK,
+    marginBottom: 18,
+  },
+  sheetRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 14, gap: 14,
+    borderBottomWidth: 1, borderBottomColor: '#EDE5D8',
+  },
+  sheetSwatch: { width: 28, height: 28, borderRadius: 8 },
+  sheetRowText: { flex: 1, fontSize: 15, color: DARK, fontWeight: '500' },
+
+  toastWrap: {
+    position: 'absolute', left: 0, right: 0, bottom: 16,
+    alignItems: 'center', zIndex: 50,
+  },
+  toast: {
+    backgroundColor: 'rgba(26,17,8,0.92)',
+    borderRadius: 999,
+    paddingHorizontal: 18, paddingVertical: 10,
+  },
+  toastText: { color: '#F5EFE6', fontSize: 13, fontWeight: '600' },
 });
