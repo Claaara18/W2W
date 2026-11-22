@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { useWardrobe } from '../context/WardrobeContext';
 import CollectionScreen from './CollectionScreen';
+import ItemTagEditor from '../components/ItemTagEditor';
+import { getItemTags, TAG_STATUS } from '../utils/wardrobeSchema';
 import {
   View, Text, ScrollView, TouchableOpacity, FlatList,
   StyleSheet, Dimensions, Modal, Image, Platform, Alert,
@@ -242,12 +244,11 @@ export default function ClosetScreen() {
   const [selCat, setSelCat]         = useState(null);
   const [processing, setProcessing] = useState(null); // { done, total }
   const [showCollection, setShowCollection] = useState(false);
-  const { items, addItem, updateItem, removeItem } = useWardrobe();
+  const { items, addItem, updateItem, updateItemTags, removeItem } = useWardrobe();
 
   // Modals
   const [editModal, setEditModal] = useState(false);   // edit item
-  const [editItem, setEditItem]   = useState(null);    // { catId, item }
-  const [editLabel, setEditLabel] = useState('');
+  const [editItem, setEditItem]   = useState(null);    // { ...item, catId }
 
   // ── helpers ────────────────────────────────────────────────
   const pieceCount = (catId) => items[catId]?.length ?? 0;
@@ -364,13 +365,14 @@ export default function ClosetScreen() {
   // ── edit / delete ───────────────────────────────────────────
   const openEditModal = (item) => {
     setEditItem(item);
-    setEditLabel(item.label);
     setEditModal(true);
   };
 
-  const saveLabel = () => {
+  // Name and tags are saved separately; tags never touch id / uri / label / bgRemoved
+  const saveEdit = ({ label, tags, confirmTags }) => {
     if (!editItem) return;
-    updateItem(editItem.catId, editItem.id, { label: editLabel.trim() || editItem.label });
+    if (label !== editItem.label) updateItem(editItem.catId, editItem.id, { label });
+    if (confirmTags) updateItemTags(editItem.catId, editItem.id, tags);
     setEditModal(false);
   };
 
@@ -484,6 +486,7 @@ export default function ClosetScreen() {
             );
           }
           // Clothing item cell
+          const tagStatus = getItemTags(item, selCat.id).tagStatus;
           return (
             <TouchableOpacity
               style={styles.itemCell}
@@ -491,40 +494,30 @@ export default function ClosetScreen() {
               activeOpacity={0.85}
             >
               <Image source={{ uri: item.uri }} style={styles.itemImage} resizeMode="contain" />
-              <Text style={styles.itemLabel}>{item.label}</Text>
+              <View style={styles.itemLabelRow}>
+                <Text style={styles.itemLabel} numberOfLines={1}>{item.label}</Text>
+                {tagStatus === TAG_STATUS.CONFIRMED ? (
+                  <Ionicons name="pricetag" size={11} color="#7A9A6E" />
+                ) : tagStatus === TAG_STATUS.AI_SUGGESTED ? (
+                  <Text style={styles.tagHint}>待確認</Text>
+                ) : (
+                  <Text style={styles.tagHint}>未標記</Text>
+                )}
+              </View>
             </TouchableOpacity>
           );
         }}
       />
 
-      {/* Edit modal */}
-      <Modal visible={editModal} transparent animationType="fade">
-        <TouchableWithoutFeedback onPress={() => setEditModal(false)}>
-          <View style={styles.modalOverlay}>
-            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-              <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-                <View style={styles.editSheet}>
-                  <Text style={styles.editTitle}>編輯單品</Text>
-                  <TextInput
-                    style={styles.editInput}
-                    value={editLabel}
-                    onChangeText={setEditLabel}
-                    placeholder="名稱"
-                    placeholderTextColor={MUTED}
-                    autoFocus
-                  />
-                  <TouchableOpacity style={styles.editSaveBtn} onPress={saveLabel}>
-                    <Text style={styles.editSaveTxt}>儲存</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.editDeleteBtn} onPress={deleteItem}>
-                    <Text style={styles.editDeleteTxt}>刪除這件衣服</Text>
-                  </TouchableOpacity>
-                </View>
-              </KeyboardAvoidingView>
-            </TouchableWithoutFeedback>
-          </View>
-        </TouchableWithoutFeedback>
-      </Modal>
+      {/* Edit modal: name + clothing tags */}
+      <ItemTagEditor
+        visible={editModal}
+        item={editItem}
+        categoryId={editItem?.catId}
+        onClose={() => setEditModal(false)}
+        onSave={saveEdit}
+        onDelete={deleteItem}
+      />
 
       {processing && (
         <ProcessingOverlay text={`去背中 ${Math.min(processing.done + 1, processing.total)}/${processing.total}…`} />
@@ -709,10 +702,13 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   itemLabel: {
+    flexShrink: 1,
     fontSize: 12,
     color: DARK,
     fontWeight: '500',
   },
+  itemLabelRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 6 },
+  tagHint: { fontSize: 10, color: MUTED, fontWeight: '600' },
 
   // Add cell
   addCell: {

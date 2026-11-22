@@ -11,6 +11,7 @@ import HomeScreen from './screens/HomeScreen';
 import MatchScreen from './screens/MatchScreen';
 import ClosetScreen from './screens/ClosetScreen';
 import CalendarScreen from './screens/CalendarScreen';
+import DevDataInspector from './components/DevDataInspector'; // DEV-only, read-only (Phase 1 · Step 0)
 
 const Tab = createBottomTabNavigator();
 
@@ -101,6 +102,7 @@ export default function App() {
         />
       </Tab.Navigator>
       </NavigationContainer>
+      {__DEV__ && <DevDataInspector />}
     </SafeAreaProvider>
     </CalendarProvider>
     </CollectionProvider>

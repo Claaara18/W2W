@@ -1,5 +1,7 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useImageUriVersion, resolveItemList } from '../utils/imageUri';
+import { backupRawOnce } from '../utils/storageBackup';
 
 export const STYLE_CATEGORIES = [
   { id: 'favorites', name: 'Favorites', color: '#E5D1C9' },
@@ -26,6 +28,7 @@ export function CollectionProvider({ children }) {
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY).then(raw => {
       if (raw) {
+        backupRawOnce(STORAGE_KEY, raw);   // exact raw string, new key only
         try {
           const saved = JSON.parse(raw);
           setLooks(prev => ({ ...emptyLooks(), ...saved }));
@@ -61,8 +64,29 @@ export function CollectionProvider({ children }) {
       [catId]: prev[catId].filter(l => l.id !== lookId),
     }));
 
+  // Display copy with repaired image paths; raw `looks` is what gets persisted.
+  const allUris = useMemo(
+    () => Object.values(looks).flatMap(arr =>
+      (Array.isArray(arr) ? arr.flatMap(l => (Array.isArray(l?.items) ? l.items.map(ci => ci?.uri) : [])) : [])),
+    [looks]
+  );
+  const uriVersion = useImageUriVersion(allUris);
+  const resolvedLooks = useMemo(() => {
+    const out = {};
+    Object.keys(looks).forEach(cat => {
+      const arr = looks[cat];
+      out[cat] = Array.isArray(arr)
+        ? arr.map(l => {
+            const items = resolveItemList(l?.items);
+            return items === l?.items ? l : { ...l, items };
+          })
+        : arr;
+    });
+    return out;
+  }, [looks, uriVersion]);
+
   return (
-    <CollectionContext.Provider value={{ looks, addLook, updateLook, toggleFavorite, removeLook }}>
+    <CollectionContext.Provider value={{ looks: resolvedLooks, addLook, updateLook, toggleFavorite, removeLook }}>
       {children}
     </CollectionContext.Provider>
   );

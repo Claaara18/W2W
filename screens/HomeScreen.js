@@ -11,7 +11,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useWardrobe } from '../context/WardrobeContext';
 import { useCollection, STYLE_CATEGORIES } from '../context/CollectionContext';
 import { useCalendar } from '../context/CalendarContext';
-import { recommendOutfits } from '../utils/outfitRecommender';
+import { recommendOutfitsWithMeta, isSameOutfit } from '../utils/outfitRecommender';
 import { useIsFocused } from '@react-navigation/native';
 import Squirrel from '../components/Squirrel';
 
@@ -520,7 +520,8 @@ export default function HomeScreen() {
   const scrollRef = useRef(null);
   const editY     = useRef(420);
   const [activeLook, setActiveLook] = useState(0);
-  const [seed,       setSeed]       = useState(0);   // +1 per shuffle, passed to recommendOutfits
+  const [seed,       setSeed]       = useState(0);   // +1 per shuffle, passed to the recommender
+  const recentRef = useRef([]);                       // outfit ids shown in the last shuffles
   const [thinking,   setThinking]   = useState(false);
   const [dealKey,    setDealKey]    = useState(0);   // remounts cards so they deal in again
   const thinkTimer = useRef(null);
@@ -557,10 +558,16 @@ export default function HomeScreen() {
 
   useEffect(() => () => clearTimeout(thinkTimer.current), []);
 
-  const findSavedCat = (outfitId) =>
-    Object.keys(collLooks).find(cat => (collLooks[cat] ?? []).some(l => l.id === outfitId));
+  // Matches both new stable ids and looks saved earlier with legacy ids (same garments)
+  const findSavedLook = (outfitId) => {
+    for (const cat of Object.keys(collLooks)) {
+      const look = (collLooks[cat] ?? []).find(l => isSameOutfit(l.id, outfitId));
+      if (look) return { cat, id: look.id };
+    }
+    return null;
+  };
 
-  const isFavorited = (outfitId) => !!findSavedCat(outfitId);
+  const isFavorited = (outfitId) => !!findSavedLook(outfitId);
 
   // Fetch weather
   useEffect(() => { loadWeather(); }, []);
@@ -570,13 +577,31 @@ export default function HomeScreen() {
     new Promise((_, reject) => setTimeout(() => reject(new Error(label + ' 逾時')), ms)),
   ]);
 
+  // Fallback chain: cache < 12h → older cache (labelled with its date) → no weather (recommender uses 22°C)
+  const applyWeatherFallback = async (reason) => {
+    const cached = await AsyncStorage.getItem('w2w_last_weather').then(JSON.parse).catch(() => null);
+    if (cached && typeof cached.temp === 'number' && typeof cached.at === 'number') {
+      const t = new Date(cached.at);
+      const hhmm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+      const recent = Date.now() - cached.at < 12 * 60 * 60 * 1000;
+      const stamp = recent ? `${hhmm} 更新` : `${t.getMonth() + 1}/${t.getDate()} ${hhmm} 的資料`;
+      console.log('[weather]    改用上次的天氣（' + stamp + '）');
+      setWeather({ ...cached, desc: `${cached.desc}・${stamp}` });
+    } else {
+      console.log('[weather]    沒有快取，推薦改用 22°C 估算');
+      setWeather({ temp: '--', feelsLike: null, desc: `${reason}・以 22°C 估算`, en: 'N/A', icon: 'cloud-outline' });
+    }
+  };
+
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
   const loadWeather = async () => {
     try {
       console.log('[weather] 1. 請求定位權限');
       const { status } = await withTimeout(Location.requestForegroundPermissionsAsync(), 20000, '權限');
       console.log('[weather]    權限結果:', status);
       if (status !== 'granted') {
-        setWeather({ temp: '--', desc: '無法取得位置', en: 'N/A', icon: 'cloud-outline' });
+        await applyWeatherFallback('無法取得位置');
         return;
       }
       console.log('[weather] 2. 取得位置');
@@ -584,7 +609,10 @@ export default function HomeScreen() {
       const loc = last ?? await withTimeout(Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Low }), 8000, '定位');
       const { latitude, longitude } = loc.coords;
       console.log('[weather] 3. 呼叫天氣 API');
-      const url = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weathercode&temperature_unit=celsius`;
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}`
+        + '&current=temperature_2m,apparent_temperature,weathercode,precipitation,wind_speed_10m'
+        + '&daily=apparent_temperature_max,apparent_temperature_min,precipitation_probability_max'
+        + '&forecast_days=1&timezone=auto&temperature_unit=celsius';
       let res;
       try {
         res = await withTimeout(fetch(url), 12000, '天氣 API');
@@ -592,33 +620,41 @@ export default function HomeScreen() {
         console.log('[weather]    第一次失敗，重試一次');
         res = await withTimeout(fetch(url), 12000, '天氣 API（重試）');
       }
+      if (!res.ok) throw new Error(`天氣 API HTTP ${res.status}`);
       const data = await res.json();
-      const info = getWeatherInfo(data.current.weathercode);
-      const fresh = { temp: Math.round(data.current.temperature_2m), ...info };
+      const cur = data?.current ?? {};
+      const temp = num(cur.temperature_2m);
+      if (temp == null) throw new Error('天氣 API 沒有氣溫資料');
+      const info = getWeatherInfo(cur.weathercode);
+      const feels = num(cur.apparent_temperature);
+      const fresh = {
+        temp: Math.round(temp),
+        feelsLike: feels == null ? null : Math.round(feels),
+        dailyMin: num(data?.daily?.apparent_temperature_min?.[0]),
+        dailyMax: num(data?.daily?.apparent_temperature_max?.[0]),
+        precipProb: num(data?.daily?.precipitation_probability_max?.[0]),
+        windSpeed: num(cur.wind_speed_10m),
+        ...info,
+      };
       setWeather(fresh);
       AsyncStorage.setItem('w2w_last_weather', JSON.stringify({ ...fresh, at: Date.now() })).catch(() => {});
-      console.log('[weather] ✓ 完成');
+      console.log('[weather] ✓ 完成', `氣溫 ${fresh.temp}°C 體感 ${fresh.feelsLike}°C`);
     } catch (e) {
       console.warn('[weather] ✗ 失敗:', e?.message);
-      const cached = await AsyncStorage.getItem('w2w_last_weather').then(JSON.parse).catch(() => null);
-      if (cached && Date.now() - cached.at < 12 * 60 * 60 * 1000) {
-        const t = new Date(cached.at);
-        const hhmm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
-        console.log('[weather]    改用上次的天氣（' + hhmm + '）');
-        setWeather({ ...cached, desc: `${cached.desc}・${hhmm} 更新` });
-      } else {
-        setWeather({ temp: '--', desc: '載入失敗', en: 'N/A', icon: 'cloud-outline' });
-      }
+      await applyWeatherFallback('載入失敗');
     } finally {
       setWeatherLoading(false);
     }
   };
 
-  // Compute recommendations — stable: only re-runs when inputs actually change
-  const recommendations = useMemo(
-    () => recommendOutfits(wardrobe, weather, selectedOcc, seed),
+  // Compute recommendations — stable: only re-runs when inputs actually change.
+  // Feels-like temperature is used first (falls back to actual temp, then 22°C).
+  const recResult = useMemo(
+    () => recommendOutfitsWithMeta(wardrobe, weather, selectedOcc, { seed, recentIds: recentRef.current }),
     [wardrobe, weather, selectedOcc, seed]
   );
+  const recommendations = recResult.outfits;
+  const recMeta = recResult.meta;
 
   useEffect(() => { setActiveLook(0); }, [recommendations]);
 
@@ -636,9 +672,9 @@ export default function HomeScreen() {
   );
 
   const toggleFav = (outfit) => {
-    const savedCat = findSavedCat(outfit.id);
-    if (savedCat) {
-      removeLook(savedCat, outfit.id);
+    const saved = findSavedLook(outfit.id);
+    if (saved) {
+      removeLook(saved.cat, saved.id);   // remove by the id it was actually saved with
     } else {
       setPickingOutfit(outfit);
     }
@@ -722,7 +758,11 @@ export default function HomeScreen() {
     ctaBar.setValue(0);
     Animated.timing(ctaBar, { toValue: 1, duration: THINK_MS, easing: Easing.linear, useNativeDriver: true }).start();
     thinkTimer.current = setTimeout(() => {
-      if (shuffle) setSeed(s => s + 1);
+      if (shuffle) {
+        // Remember the last two rounds so the next shuffle prefers looks not just seen
+        recentRef.current = [...recommendations.map(o => o.id), ...recentRef.current].slice(0, 6);
+        setSeed(s => s + 1);
+      }
       const sq = sqRef.current;
       if (!willShow) {
         sq?.setPose('idle');
@@ -776,7 +816,9 @@ export default function HomeScreen() {
               <>
                 <Ionicons name={weather.icon} size={22} color="#E8A020" />
                 <Text style={styles.weatherTemp}>{displayTemp}°C</Text>
-                <Text style={styles.weatherDesc}>{weather.desc}</Text>
+                <Text style={styles.weatherDesc}>
+                  {typeof weather.feelsLike === 'number' ? `體感 ${weather.feelsLike}°・` : ''}{weather.desc}
+                </Text>
               </>
             )}
           </Rise>
@@ -791,7 +833,10 @@ export default function HomeScreen() {
                 key={occ}
                 label={occ}
                 selected={selectedOcc === occ}
-                onPress={() => { cancelThinking(); setSelectedOcc(occ); setShowRecs(false); }}
+                onPress={() => {
+                  cancelThinking(); setSelectedOcc(occ); setShowRecs(false);
+                  setSeed(0); recentRef.current = [];   // new occasion starts from its best looks
+                }}
               />
             ))}
           </View>
@@ -857,7 +902,7 @@ export default function HomeScreen() {
           ) : recommendations.length === 0 ? (
             <View style={styles.emptyWrap}>
               <Ionicons name="cloudy-outline" size={18} color={LABEL} />
-              <Text style={styles.emptyDesc}>找不到適合的搭配，試試其他場合</Text>
+              <Text style={styles.emptyDesc}>{recMeta.message ?? '找不到適合的搭配，試試其他場合'}</Text>
             </View>
           ) : (
             <>
