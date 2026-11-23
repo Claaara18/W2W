@@ -13,6 +13,8 @@ import { captureRef } from 'react-native-view-shot';
 import * as MediaLibrary from 'expo-media-library/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { STICKER_CATS, STICKER_SOURCES } from '../data/stickers';
+import { BRAND_LOGO, BRAND_LOGO_CROP } from '../utils/brandAssets';
+import { exportLayout, cropWindow } from '../utils/exportLayout';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const BG       = '#F2EDE8';
@@ -30,6 +32,19 @@ const DATE_SAFE    = 12;
 const MONTH_HDR_H  = 58;
 const DAY_HDR_H    = 26;
 const DIARY_H      = 340;
+const SEL_INSET    = 3.5;   // selection ring sits this far outside an item (was border 1.5 + padding 2)
+
+// ── Exported image only (the on-screen journal is never changed) ──
+// Matches the reference layout (393×852pt): the canvas keeps its full width and aspect ratio,
+// the whole canvas moves down EXPORT_TOP_PAD, and the month row is redrawn without arrows and
+// with a larger title. The W2W signature sits in the diary blank area (≈ 85% of the height).
+const EXPORT_TOP_PAD     = 52;   // grid starts ≈ 110pt from the top, title centred ≈ 80pt
+const EXPORT_BOTTOM_PAD  = 30;   // canvas ends with a 60pt page-colour strip → 90pt (1.5×) in the export
+const EXPORT_TITLE_SIZE  = 46;   // "November" ≈ 230pt wide in the reference
+const LOGO_W             = 85;   // signature width (height follows the artwork's proportions)
+const LOGO_RIGHT         = 24;   // from the right edge
+const CANVAS_FOOTER_H    = 60;   // the canvas ends with this page-colour strip (CANVAS_H = … + DIARY_H + 60)
+
 const TOOLBAR_H    = 48;
 const PHOTO_SIZE   = 150;
 // Adjust-photo overlay preview size
@@ -830,11 +845,13 @@ function CanvasItem({
   }
 
   return (
+    // The wrapper's size never depends on selection: the outline is drawn as an absolute ring,
+    // so selecting / deselecting / exporting never moves the content (WYSIWYG placement).
     <Animated.View
-      style={[cs.itemWrap, { zIndex: isSelected?200:100 }, animStyle,
-        isSelected && !capturing && cs.selected]}
+      style={[cs.itemWrap, { zIndex: isSelected?200:100 }, animStyle]}
       {...pr.panHandlers}>
       {content}
+      {isSelected && !capturing && <View pointerEvents="none" style={cs.selectedRing} />}
       {isSelected && !capturing && (
         <TouchableOpacity style={cs.deleteBtn} onPress={() => cb.current.onDelete()} hitSlop={8}>
           <Ionicons name="close-circle" size={20} color="#B09080" />
@@ -845,6 +862,48 @@ function CanvasItem({
 }
 
 // ── Main journal screen ────────────────────────────────────────
+/**
+ * Off-screen frame used only while saving: top space + the canvas capture at its exact
+ * aspect ratio (no stretching) + bottom space with the W2W signature in the right corner.
+ * It sits outside the visible area, so the journal on screen never changes.
+ */
+function ExportFrame({ shot, monthName, frameRef, onPartLoaded }) {
+  // Only the drawn part of the logo file is shown (it has a large transparent area)
+  const win = BRAND_LOGO ? cropWindow(BRAND_LOGO_CROP, LOGO_W) : null;
+  const { frameW, contentW, contentH, logoBottom } = exportLayout({
+    shotW: shot.w, shotH: shot.h, viewW: SCREEN_W, topPad: EXPORT_TOP_PAD, bottomPad: EXPORT_BOTTOM_PAD,
+    footerH: CANVAS_FOOTER_H + EXPORT_BOTTOM_PAD, logoW: LOGO_W,
+    logoAspect: BRAND_LOGO_CROP.width / BRAND_LOGO_CROP.height,
+  });
+  return (
+    // Inside the window, underneath the opaque page (never visible), so it renders normally
+    <View pointerEvents="none" style={{ position:'absolute', top:0, left:0, width:frameW, backgroundColor:BG }}>
+      <View ref={frameRef} collapsable={false}
+        style={{ width:frameW, backgroundColor:BG, paddingTop:EXPORT_TOP_PAD, paddingBottom:EXPORT_BOTTOM_PAD }}>
+        <View style={{ width:contentW, height:contentH, backgroundColor:BG }}>
+          <Image source={{ uri: shot.uri }} style={{ width:contentW, height:contentH }} resizeMode="stretch"
+            onLoad={onPartLoaded} onError={onPartLoaded} />
+        </View>
+        {/* Month row, export only: page colour over the original title + arrows, then the larger title */}
+        <View style={{ position:'absolute', top:EXPORT_TOP_PAD, left:0, width:frameW, height:MONTH_HDR_H,
+          backgroundColor:BG, alignItems:'center', justifyContent:'center', paddingHorizontal:12 }}>
+          <Text numberOfLines={1} adjustsFontSizeToFit
+            style={{ width:'100%', textAlign:'center', fontFamily:SERIF, fontSize:EXPORT_TITLE_SIZE, fontWeight:'700', color:DARK, letterSpacing:-0.5 }}>
+            {monthName}
+          </Text>
+        </View>
+        {/* W2W signature: right side of the bottom page-colour strip, vertically centred in it */}
+        {win && (
+          <View style={{ position:'absolute', right:LOGO_RIGHT, bottom:logoBottom, width:win.windowW, height:win.windowH, overflow:'hidden' }}>
+            <Image source={BRAND_LOGO} resizeMode="stretch" onLoad={onPartLoaded} onError={onPartLoaded}
+              style={{ position:'absolute', left:win.left, top:win.top, width:win.imageW, height:win.imageH }} />
+          </View>
+        )}
+      </View>
+    </View>
+  );
+}
+
 export default function JournalScreen({ visible, onClose, viewYear, viewMonth, entries }) {
   const insets = useSafeAreaInsets();
 
@@ -861,6 +920,9 @@ export default function JournalScreen({ visible, onClose, viewYear, viewMonth, e
   const [journalReady,  setJournalReady]  = useState(false);
 
   const canvasRef        = useRef();
+  const exportRef        = useRef();          // off-screen export frame
+  const exportLoaded     = useRef(null);      // called when each image in the frame has loaded
+  const [exportShot, setExportShot] = useState(null);   // { uri, w, h } while composing
   const scrollRef        = useRef();
   const saveTimerRef     = useRef(null);
   const switchKeyRef     = useRef(null);
@@ -1047,7 +1109,10 @@ export default function JournalScreen({ visible, onClose, viewYear, viewMonth, e
     scrollRef.current?.scrollTo({ y:0, animated:false });
     await new Promise(r => setTimeout(r,150));
     try {
-      const uri = await captureRef(canvasRef, { format:'png', quality:1.0 });
+      const raw = await captureRef(canvasRef, { format:'png', quality:1.0 });
+      let uri = raw;
+      try { uri = await composeExport(raw); }
+      catch (e) { console.warn('[journal export] 加邊框失敗，改存原本的圖：', e?.message ?? e); }
       const { status } = await MediaLibrary.requestPermissionsAsync();
       if (status!=='granted') {
         Alert.alert('需要相簿權限','請到 設定 → W2W → 相片 開啟存取權限'); return;
@@ -1057,7 +1122,23 @@ export default function JournalScreen({ visible, onClose, viewYear, viewMonth, e
     } catch (e) {
       console.warn('Journal capture error:',e);
       Alert.alert('儲存失敗','請再試一次');
-    } finally { setCapturing(false); }
+    } finally { setCapturing(false); setExportShot(null); }
+  };
+
+  // Canvas capture → off-screen frame (top space, same image, bottom space + logo) → capture
+  const composeExport = async (rawUri) => {
+    const size = await new Promise((resolve, reject) =>
+      Image.getSize(rawUri, (w, h) => resolve({ w, h }), reject));
+    const expected = BRAND_LOGO ? 2 : 1;
+    const loaded = new Promise((resolve, reject) => {
+      let n = 0;
+      exportLoaded.current = () => { n += 1; if (n >= expected) resolve(); };
+      setTimeout(() => reject(new Error('export frame load timeout')), 4000);
+    });
+    setExportShot({ uri: rawUri, ...size });
+    await loaded;
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));   // let it paint
+    return captureRef(exportRef, { format:'png', quality:1.0 });
   };
 
   const currentCat  = STICKER_CATS.find(c => c.id===selectedCat) ?? STICKER_CATS[0];
@@ -1067,6 +1148,14 @@ export default function JournalScreen({ visible, onClose, viewYear, viewMonth, e
   return (
     <Modal visible={visible} animationType="slide" statusBarTranslucent>
       <View style={{ flex:1, backgroundColor:BG }}>
+
+        {/* Export-only frame (exists only while saving), drawn underneath the page below */}
+        {exportShot && (
+          <ExportFrame shot={exportShot} monthName={MONTH_NAMES[jMonth]} frameRef={exportRef} onPartLoaded={() => exportLoaded.current?.()} />
+        )}
+
+        {/* Opaque page layer — same layout as before (flex:1 column), covers the export frame */}
+        <View style={{ flex:1, backgroundColor:BG }}>
 
         {/* Toolbar */}
         <View style={[js.toolbar, { paddingTop: insets.top+6 }]}>
@@ -1211,6 +1300,7 @@ export default function JournalScreen({ visible, onClose, viewYear, viewMonth, e
             ))}
           </ScrollView>
         </View>
+        </View>
       </View>
 
       {/* Text editor overlay */}
@@ -1237,11 +1327,14 @@ export default function JournalScreen({ visible, onClose, viewYear, viewMonth, e
 // ── Styles ─────────────────────────────────────────────────────
 const cs = StyleSheet.create({
   itemWrap:    { position:'absolute' },
-  selected:    { borderWidth:1.5, borderColor:'#C8B5A5', borderStyle:'dashed', borderRadius:6, padding:2 },
+  // Selection outline outside the content (same place the old border+padding drew it),
+  // without changing the wrapper's layout
+  selectedRing:{ position:'absolute', top:-SEL_INSET, left:-SEL_INSET, right:-SEL_INSET, bottom:-SEL_INSET,
+    borderWidth:1.5, borderColor:'#C8B5A5', borderStyle:'dashed', borderRadius:6 },
   stickerText: { fontSize:44, lineHeight:52 },
   stickerImg:  { width:100, height:100 },
   textBase:    { fontSize:18, maxWidth: SCREEN_W * 0.72 },
-  deleteBtn:   { position:'absolute', top:-11, right:-11,
+  deleteBtn:   { position:'absolute', top:-11 - SEL_INSET, right:-11 - SEL_INSET,
     backgroundColor:'rgba(242,237,232,0.94)', borderRadius:11 },
 });
 

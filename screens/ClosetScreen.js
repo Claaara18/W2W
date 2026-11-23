@@ -2,6 +2,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useWardrobe } from '../context/WardrobeContext';
 import CollectionScreen from './CollectionScreen';
 import ItemTagEditor from '../components/ItemTagEditor';
+import { processUploads } from '../utils/uploadPipeline';
+import { EDITOR_MODE, startQueue, currentId, nextQueue, progressOf } from '../utils/uploadOnboarding';
 import Squirrel from '../components/Squirrel';
 import { getItemTags, TAG_STATUS } from '../utils/wardrobeSchema';
 import {
@@ -249,6 +251,7 @@ export default function ClosetScreen() {
   const { items, addItem, updateItem, updateItemTags, removeItem } = useWardrobe();
   const isFocused  = useIsFocused();
   const failedRef  = useRef([]);   // shown after the overlay has faded out
+  const pendingGuideRef = useRef(null);   // { catId, ids } saved by the last upload, guided after the overlay
 
   // Header squirrel: quiet, between the title and the heart, feet just above the divider
   const headSqRef = useRef(null);
@@ -268,6 +271,8 @@ export default function ClosetScreen() {
   // Modals
   const [editModal, setEditModal] = useState(false);   // edit item
   const [editItem, setEditItem]   = useState(null);    // { ...item, catId }
+  // "Tag the new clothes" guide — explicit mode, only created from a finished upload
+  const [guide, setGuide] = useState(null);            // { catId, ids, index } | null
 
   // ── helpers ────────────────────────────────────────────────
   const pieceCount = (catId) => items[catId]?.length ?? 0;
@@ -339,55 +344,50 @@ export default function ClosetScreen() {
   };
 
   const processAndAdd = async (catId, uris) => {
-    const baseCount = items[catId]?.length ?? 0;
-    const failed = [];
-    let added = 0;
+    if (processing) return;   // one upload batch at a time — never add the same photos twice
     setProcessing({ total: uris.length, step: 0, uri: uris[0], outcomes: [], finished: false });
+    let result = { addedIds: [], failed: [] };
     try {
-      for (let i = 0; i < uris.length; i++) {
-        setProcessing(p => ({ ...p, step: i, uri: uris[i] }));
-        const ts = Date.now() + i;
-        let finalUri = null;
-        let bgRemoved = true;
-        let prepared = uris[i];
-        try {
-          prepared = await prepareImage(uris[i]);
-          finalUri = await removeBackground(prepared);
-        } catch (err) {
-          console.warn(`[processAndAdd] 第 ${i + 1} 張去背失敗，改存原圖：`, err.message);
-          failed.push(i + 1);
-          bgRemoved = false;
-          try { finalUri = await keepOriginal(prepared); }
-          catch (e2) { console.error('[processAndAdd] 保存原圖也失敗：', e2.message); }
-        }
-        if (finalUri) {
-          addItem(catId, {
-            id: `${catId}_${ts}`,
-            uri: finalUri,
-            label: `look ${baseCount + added + 1}`,
-            bgRemoved,
-          });
-          added++;
-        }
-        const outcome = finalUri && bgRemoved ? 'ok' : 'fail';
-        setProcessing(p => ({ ...p, outcomes: [...p.outcomes, outcome] }));
-      }
+      // Same loop as before: each photo is saved (addItem → persisted) as soon as it is ready
+      result = await processUploads(catId, uris, {
+        prepareImage, removeBackground, keepOriginal, addItem,
+        baseCount: items[catId]?.length ?? 0,
+        onStep: (i) => setProcessing(p => ({ ...p, step: i, uri: uris[i] })),
+        onOutcome: (outcome) => setProcessing(p => ({ ...p, outcomes: [...p.outcomes, outcome] })),
+      });
     } finally {
       // The overlay plays its finale and fades out, then calls onProcessingHidden
       setProcessing(p => p && { ...p, finished: true });
     }
-    failedRef.current = failed;
+    failedRef.current = result.failed;
+    pendingGuideRef.current = result.addedIds.length ? { catId, ids: result.addedIds } : null;
+  };
+
+  // Open the tag guide for the clothes that were actually saved (in pick order)
+  const startGuide = (pending) => {
+    const queue = startQueue(pending?.catId, pending?.ids);
+    if (!queue) return;
+    const cat = CATEGORIES.find(c => c.id === queue.catId);
+    if (cat) { setSelCat(cat); setView('detail'); }
+    setEditModal(false);
+    setGuide(queue);
   };
 
   const onProcessingHidden = () => {
     setProcessing(null);
     const failed = failedRef.current;
     failedRef.current = [];
+    const pending = pendingGuideRef.current;
+    pendingGuideRef.current = null;
     if (failed.length > 0) {
+      // Start the guide only after this alert is closed (an alert over a modal is unreliable on iOS)
       setTimeout(() => Alert.alert(
         '部分照片未去背',
-        `第 ${failed.join('、')} 張去背失敗，已先保留原圖加入衣櫃。\n建議使用背景單純、衣服完整的照片。`
+        `第 ${failed.join('、')} 張去背失敗，已先保留原圖加入衣櫃。\n建議使用背景單純、衣服完整的照片。`,
+        [{ text: pending ? '開始設定標籤' : '好', onPress: () => startGuide(pending) }]
       ), 300);
+    } else if (pending) {
+      setTimeout(() => startGuide(pending), 300);
     }
   };
 
@@ -410,6 +410,33 @@ export default function ClosetScreen() {
     removeItem(editItem.catId, editItem.id);
     setEditModal(false);
   };
+
+  // ── tag guide (after upload) ────────────────────────────────
+  // Always the live item from the wardrobe, looked up by id — never another item's tags
+  const guideRaw  = guide ? (items[guide.catId] ?? []).find(i => i.id === currentId(guide)) : null;
+  const guideItem = guideRaw ? { ...guideRaw, catId: guide.catId } : null;
+  const advanceGuide = () => setGuide(g => nextQueue(g));
+
+  // The current item no longer exists (e.g. deleted) → move on
+  useEffect(() => {
+    if (guide && !guideRaw) advanceGuide();
+  }, [guide, !!guideRaw]);
+
+  // Saved immediately (each item on its own), then the next one opens
+  const saveGuide = ({ label, tags, confirmTags }) => {
+    if (!guideItem) return;
+    if (label !== guideItem.label) updateItem(guideItem.catId, guideItem.id, { label });
+    if (confirmTags) updateItemTags(guideItem.catId, guideItem.id, tags);
+    advanceGuide();
+  };
+  // "稍後再說": nothing is written; the item stays exactly as it is
+  const skipGuide = () => advanceGuide();
+  const deleteGuide = () => {
+    if (!guideItem) return;
+    removeItem(guideItem.catId, guideItem.id);
+    advanceGuide();
+  };
+  const endGuide = () => setGuide(null);
 
   if (showCollection) {
     return <CollectionScreen onBack={() => setShowCollection(false)} />;
@@ -540,15 +567,30 @@ export default function ClosetScreen() {
         }}
       />
 
-      {/* Edit modal: name + clothing tags */}
-      <ItemTagEditor
-        visible={editModal}
-        item={editItem}
-        categoryId={editItem?.catId}
-        onClose={() => setEditModal(false)}
-        onSave={saveEdit}
-        onDelete={deleteItem}
-      />
+      {/* Edit modal: name + clothing tags (normal edit, or the guide after an upload) */}
+      {guide ? (
+        <ItemTagEditor
+          visible={!!guideItem}
+          mode={EDITOR_MODE.ONBOARDING}
+          progress={progressOf(guide)}
+          item={guideItem}
+          categoryId={guide.catId}
+          onClose={endGuide}
+          onSkip={skipGuide}
+          onSave={saveGuide}
+          onDelete={deleteGuide}
+        />
+      ) : (
+        <ItemTagEditor
+          visible={editModal}
+          mode={EDITOR_MODE.EDIT}
+          item={editItem}
+          categoryId={editItem?.catId}
+          onClose={() => setEditModal(false)}
+          onSave={saveEdit}
+          onDelete={deleteItem}
+        />
+      )}
 
       {processing && (
         <ProcessingOverlay processing={processing} paused={!isFocused} onHidden={onProcessingHidden} />

@@ -4,6 +4,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CATEGORY_IDS, PROTECTED_FIELDS, TAG_STATUS, sanitizeTags, hasAnyTag } from '../utils/wardrobeSchema';
 import { useImageUriVersion, resolveItemList } from '../utils/imageUri';
 import { backupRawOnce } from '../utils/storageBackup';
+import {
+  CUSTOM_TAGS_KEY, emptyLibrary, sanitizeLibrary, resolveItemCustomTags,
+  addSubType, updateSubType, deleteSubType, addColor, updateColor, deleteColor,
+} from '../utils/customTags';
 
 const STORAGE_KEY = '@w2w_wardrobe';
 
@@ -70,6 +74,50 @@ export function WardrobeProvider({ children }) {
       .catch(e => console.warn('[wardrobe] 儲存失敗：', e?.message ?? e));
   }, [items, loaded, loadError]);
 
+  // ── Custom tag library (own key; never touches @w2w_wardrobe) ──
+  const [customTags, setCustomTags] = useState(emptyLibrary);
+  const [tagsLoaded, setTagsLoaded] = useState(false);
+  const [tagsError, setTagsError]   = useState(null);   // set → library saving disabled this session
+
+  useEffect(() => {
+    AsyncStorage.getItem(CUSTOM_TAGS_KEY)
+      .then(raw => {
+        if (raw == null) { setTagsLoaded(true); return; }
+        try {
+          setCustomTags(sanitizeLibrary(JSON.parse(raw)));
+          setTagsLoaded(true);
+        } catch (e) {
+          console.warn('[customTags] 讀取失敗，這次不會儲存自訂標籤：', e?.message ?? e);
+          setTagsError('parse');
+          AsyncStorage.setItem(`${CUSTOM_TAGS_KEY}_corrupt_${Date.now()}`, raw).catch(() => {});
+        }
+      })
+      .catch(e => { console.warn('[customTags] 讀取失敗：', e?.message ?? e); setTagsError('read'); });
+  }, []);
+
+  useEffect(() => {
+    if (!tagsLoaded || tagsError) return;
+    AsyncStorage.setItem(CUSTOM_TAGS_KEY, JSON.stringify(customTags))
+      .catch(e => console.warn('[customTags] 儲存失敗：', e?.message ?? e));
+  }, [customTags, tagsLoaded, tagsError]);
+
+  // Each returns { entry } on success or { error } (message for the user)
+  const libraryAction = (fn) => {
+    if (!tagsLoaded || tagsError) return { error: '自訂標籤暫時無法使用，請重新開啟 App' };
+    const r = fn(customTags);
+    if (r.error) return { error: r.error };
+    setCustomTags(r.lib ?? r);
+    return { entry: r.entry ?? null };
+  };
+  const tagActions = {
+    addCustomSubType:    (cat, input)     => libraryAction(lib => addSubType(lib, cat, input)),
+    updateCustomSubType: (cat, id, input) => libraryAction(lib => updateSubType(lib, cat, id, input)),
+    deleteCustomSubType: (cat, id)        => libraryAction(lib => ({ lib: deleteSubType(lib, cat, id) })),
+    addCustomColor:      (input)          => libraryAction(lib => addColor(lib, input)),
+    updateCustomColor:   (id, input)      => libraryAction(lib => updateColor(lib, id, input)),
+    deleteCustomColor:   (id)             => libraryAction(lib => ({ lib: deleteColor(lib, id) })),
+  };
+
   const addItem = (catId, item) =>
     setItems(prev => ({ ...prev, [catId]: [...(prev[catId] ?? []), item] }));
 
@@ -103,8 +151,9 @@ export function WardrobeProvider({ children }) {
       [catId]: (prev[catId] ?? []).filter(i => i.id !== itemId),
     }));
 
-  // Display copy with repaired image paths. `items` (raw) is what gets persisted;
-  // every write above works on raw state by id, and uri can never be updated.
+  // Display copy: repaired image paths + latest custom tag names/colours from the library.
+  // `items` (raw) is what gets persisted; every write above works on raw state by id,
+  // and uri can never be updated.
   const allUris = useMemo(
     () => Object.values(items).flatMap(arr => (Array.isArray(arr) ? arr.map(i => i?.uri) : [])),
     [items]
@@ -112,12 +161,25 @@ export function WardrobeProvider({ children }) {
   const uriVersion = useImageUriVersion(allUris);
   const resolvedItems = useMemo(() => {
     const out = {};
-    Object.keys(items).forEach(cat => { out[cat] = resolveItemList(items[cat]); });
+    Object.keys(items).forEach(cat => {
+      const list = resolveItemList(items[cat]);
+      if (!Array.isArray(list)) { out[cat] = list; return; }
+      let changed = false;
+      const mapped = list.map(i => {
+        const r = resolveItemCustomTags(i, cat, customTags);
+        if (r !== i) changed = true;
+        return r;
+      });
+      out[cat] = changed ? mapped : list;
+    });
     return out;
-  }, [items, uriVersion]);
+  }, [items, uriVersion, customTags]);
 
   return (
-    <WardrobeContext.Provider value={{ items: resolvedItems, addItem, updateItem, updateItemTags, removeItem, loaded, loadError }}>
+    <WardrobeContext.Provider value={{
+      items: resolvedItems, addItem, updateItem, updateItemTags, removeItem, loaded, loadError,
+      customTags, customTagsReady: tagsLoaded && !tagsError, ...tagActions,
+    }}>
       {children}
     </WardrobeContext.Provider>
   );

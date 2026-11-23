@@ -16,8 +16,8 @@
  *         occasion 'Casual' | 'School' | 'Work' | 'Date'
  *         options  { seed = 0, recentIds = [] }
  */
-import { estimateWarmth, getItemTags, hasAnyTag } from './wardrobeSchema';
-import { outfitColorScore } from './colorHarmony';
+import { estimateWarmth, getItemTags, hasAnyTag, thicknessFactor } from './wardrobeSchema';
+import { outfitColorScore, describeHex } from './colorHarmony';
 
 export const OCCASIONS = ['Casual', 'School', 'Work', 'Date'];
 
@@ -140,7 +140,9 @@ function weatherEval(outfit, T, weather) {
   if (T >= 27 && outfit.parts.some(p => p.role !== 'bottom' && (p.tags.thickness === 'thick' || p.warmth >= 3.5))) {
     return { ...base, ok: false, fail: 'hot_thick' };
   }
-  if (T >= 24 && outfit.parts.some(p => p.tags.thickness === 'thick' && p.tags.subType === 'sweater')) {
+  // Any thick long-sleeve or warm top / jacket / dress (built-in or custom type) is too much from 24°C
+  if (T >= 24 && outfit.parts.some(p => p.role !== 'bottom' && p.tags.thickness === 'thick'
+      && (p.tags.sleeveLength === 'long' || p.warmth >= 3))) {
     return { ...base, ok: false, fail: 'hot_thick' };
   }
 
@@ -151,7 +153,7 @@ function weatherEval(outfit, T, weather) {
   if (T < 20 && outfit.legWarmth < legReq + 0.3) score -= 0.06;   // legs only just warm enough
   if (T >= 29 && outfit.legWarmth >= 2.0) score -= 0.05;
   if (isRainy(weather) && outfit.parts.some(p =>
-    (p.cat === 'skirts' && p.tags.subType === 'mini') || (p.cat === 'dresses' && p.tags.subType === 'slip'))) {
+    (p.cat === 'skirts' && p.tags.baseSubType === 'mini') || (p.cat === 'dresses' && ['slip', 'romper'].includes(p.tags.baseSubType)))) {
     score -= 0.10;
   }
   const swing = (weather?.dailyMax ?? NaN) - (weather?.dailyMin ?? NaN);
@@ -177,13 +179,13 @@ const OCCASION_RULES = {
     plus: ['casual', 'minimal', 'sporty', 'vintage', 'sweet'],
     minus: ['formal'],
     exclude: [],
-    penalty: { 'tshirts:tank': 0.15, 'dresses:slip': 0.2, 'skirts:mini': 0.1 },
+    penalty: { 'tshirts:tank': 0.15, 'dresses:slip': 0.2, 'skirts:mini': 0.1, 'dresses:romper': 0.1 },
   },
   Work: {
     lo: 3, hi: 5, peak: 4,
     plus: ['formal', 'minimal'],
     minus: ['sporty', 'street'],
-    exclude: ['pants:shorts', 'pants:joggers', 'pants:leggings', 'tshirts:tank', 'tshirts:hoodie', 'jackets:zip_hoodie'],
+    exclude: ['pants:shorts', 'pants:joggers', 'pants:leggings', 'tshirts:tank', 'tshirts:hoodie', 'jackets:zip_hoodie', 'dresses:romper'],
     penalty: { 'skirts:mini': 0.15, 'dresses:slip': 0.2, 'skirts:denim': 0.1, 'pants:jeans': 0.05, 'tshirts:tee': 0.05, 'jackets:windbreaker': 0.1 },
   },
   Date: {
@@ -197,11 +199,36 @@ const OCCASION_RULES = {
 
 const OCCASION_MIN_SCORE = 0.3;
 
+const HARD_TYPE_LIMITS    = ['pants:shorts', 'dresses:romper'];   // never waived for custom types
+const DRESSY_STYLES       = ['formal', 'minimal'];
+const CASUAL_STYLES       = ['sporty', 'street'];
+const CUSTOM_SOFT_PENALTY = 0.08;
+const CUSTOM_HARD_PENALTY = 0.25;
+
 function occasionEval(outfit, occasion) {
   const rule = OCCASION_RULES[occasion] ?? OCCASION_RULES.Casual;
-  const subKeys = outfit.parts.filter(p => p.tags.subType).map(p => `${p.cat}:${p.tags.subType}`);
-  const excluded = subKeys.find(k => rule.exclude.includes(k));
-  if (excluded) return { ok: false, fail: 'occ_type', detail: excluded };
+  // Custom types: an internal base (older data only) may add type rules; new custom types have
+  // no base and are judged purely by category, sleeve, thickness, formality and style tags
+  const subKeys = outfit.parts.filter(p => p.tags.baseSubType).map(p => `${p.cat}:${p.tags.baseSubType}`);
+
+  // Type exclusions. Built-in types: excluded as before. Custom types are judged by their own
+  // tags too: a dressy custom piece (formality ≥ 3 + formal/minimal style) gets a small penalty
+  // instead; formality ≥ 3 without a dressy style gets a large one; anything else stays excluded.
+  // Leg-baring bases (shorts, romper) are never waived.
+  let typePenalty = 0;
+  for (const p of outfit.parts) {
+    if (!p.tags.baseSubType) continue;
+    const k = `${p.cat}:${p.tags.baseSubType}`;
+    if (!rule.exclude.includes(k)) continue;
+    if (!p.tags.customSubType || HARD_TYPE_LIMITS.includes(k)) return { ok: false, fail: 'occ_type', detail: k };
+    const own = p.tags;
+    const dressy = own.styles.some(st => DRESSY_STYLES.includes(st));
+    const casual = own.styles.some(st => CASUAL_STYLES.includes(st));
+    const sheer  = own.baseSubType === 'tank' && own.thickness === 'thin';
+    if (own.formality != null && own.formality >= 3 && dressy && !casual && !sheer) typePenalty += CUSTOM_SOFT_PENALTY;
+    else if (own.formality != null && own.formality >= 3 && !casual && !sheer) typePenalty += CUSTOM_HARD_PENALTY;
+    else return { ok: false, fail: 'occ_type', detail: `${k}（自訂：${own.customSubType.label}）` };
+  }
 
   // Formality (dress counts double)
   let fs = 0, fw = 0, fmin = 9, fmax = -9;
@@ -223,7 +250,7 @@ function occasionEval(outfit, occasion) {
     styleFit = clamp01(0.5 + 0.4 * (plus / styled.length) - 0.45 * (minus / styled.length));
   }
 
-  let score = 0.6 * formFit + 0.4 * styleFit;
+  let score = 0.6 * formFit + 0.4 * styleFit - typePenalty;
   for (const k of subKeys) score -= rule.penalty[k] ?? 0;
   if (fmax - fmin > 2) score -= 0.15;   // e.g. blazer + joggers
   score = clamp01(score);
@@ -268,7 +295,10 @@ function toPart(item, cat) {
     tagged: hasAnyTag(tags),
     warmth: estimateWarmth(item, cat),
     formality: tags.formality ?? DEFAULT_FORMALITY[cat] ?? 2.5,
-    color: tags.primaryColor,
+    color: tags.baseColor,   // built-in base (fallback, variety, display)
+    // what colour scoring uses: built-in value, or { hex } for custom colours
+    colorRef: tags.customColor ? { value: tags.baseColor, hex: tags.customColor.hex, custom: true } : tags.primaryColor,
+    colorName: tags.colorLabel ?? null,
   };
 }
 
@@ -305,10 +335,14 @@ function buildOutfit(parts) {
   const warmth = dress
     ? 1.3 * dress.warmth + (outer?.warmth ?? 0)
     : top.warmth + (outer?.warmth ?? 0) + 0.6 * bottom.warmth;
-  // Leg coverage: slip dress ≈ bare legs, knit dress ≈ midi skirt, others ≈ knee-length skirt
+  // Leg coverage of one-piece garments:
+  //   jumpsuit (連身褲) ≈ long trousers, romper (連身短褲) ≈ shorts — both scale with thickness;
+  //   slip dress ≈ bare legs, knit dress ≈ midi skirt, other dresses ≈ knee-length skirt.
+  const dBase = dress?.tags.baseSubType;
   const legWarmth = dress
-    ? (dress.tags.subType === 'slip' ? 0.5 : dress.tags.subType === 'knit' ? 1.1 : 0.8)
-      + (dress.tags.thickness === 'thick' ? 0.2 : 0)
+    ? dBase === 'jumpsuit' ? 1.6 * thicknessFactor(dress.tags.thickness)
+      : dBase === 'romper' ? 0.3 * thicknessFactor(dress.tags.thickness)
+      : (dBase === 'slip' ? 0.5 : dBase === 'knit' ? 1.1 : 0.8) + (dress.tags.thickness === 'thick' ? 0.2 : 0)
     : bottom.warmth;
   return {
     id: outfitIdFromParts(ordered),
@@ -348,8 +382,16 @@ export function makeRng(seed) {
   };
 }
 
+// Palette signature for variety: built-in colours by value, custom colours by hue / lightness band
+const colorKey = (p) => {
+  if (p.colorRef && typeof p.colorRef === 'object') {
+    const d = describeHex(p.colorRef.hex);
+    return d.neutral ? `n${Math.round(d.L * 4)}` : `c${Math.round(d.h / 30) % 12}`;
+  }
+  return p.color;
+};
 const colorSig = (o) => {
-  const cs = o.parts.map(p => p.color);
+  const cs = o.parts.map(colorKey);
   return cs.every(Boolean) ? [...cs].sort().join('+') : null;
 };
 
@@ -365,53 +407,87 @@ function similarity(a, b) {
 }
 
 const DIVERSITY_LAMBDA = 0.35;
-const POOL_MARGIN      = 0.15;   // shuffle only among looks within this of the best score
 const SHUFFLE_NOISE    = 0.12;
-const RECENT_PENALTY   = 0.30;
+const SEVERE_PENALTY   = 0.12;   // total-score penalty for a severe colour clash
+
+// Tiers (all candidates here already passed the weather + occasion hard filters):
+//   1  high quality: close to the best score, good colour + style, no shared top/dress
+//   2  relaxed colour / style (still no severe clash, within TIER2_MARGIN of the best)
+//   3  same pool, may reuse a top / bottom across looks (never an identical look)
+//   then any non-severe look (small wardrobes), and severe clashes only if nothing else exists.
+// Each pass first skips looks shown in the last two shuffles; they are allowed again only
+// when there is nothing new left.
+const TIER1_MARGIN    = 0.15;
+const TIER1_MIN_COLOR = 0.55;
+const TIER1_MIN_STYLE = 0.45;
+const TIER2_MARGIN    = 0.30;
 
 function selectLooks(scored, n, seed, recentIds) {
-  if (!scored.length) return { chosen: [], allRecent: false };
+  if (!scored.length) return { chosen: [], allRecent: false, tiers: {} };
   const recent = new Set(recentIds ?? []);
-  const best = scored[0].total;
-
-  let pool = scored;
-  if (seed > 0) {
-    const near = scored.filter(c => c.total >= best - POOL_MARGIN);
-    pool = near.length >= n ? near : scored;   // every candidate here already passed the hard filters
-  }
+  const fine = scored.filter(c => !c.severe);
+  const best = (fine[0] ?? scored[0]).total;
+  const tier1 = fine.filter(c => c.total >= best - TIER1_MARGIN
+    && c.breakdown.color >= TIER1_MIN_COLOR && c.breakdown.style >= TIER1_MIN_STYLE);
+  const tier2 = fine.filter(c => c.total >= best - TIER2_MARGIN);
 
   const rng = makeRng(seed * 2654435761 + 17);
-  const keyed = pool.map(c => ({
-    c,
-    key: c.total
-      + (seed > 0 ? SHUFFLE_NOISE * rng() : 0)
-      - (recent.has(c.id) ? RECENT_PENALTY : 0),
-  }));
+  const noise = new Map(scored.map(c => [c.id, seed > 0 ? SHUFFLE_NOISE * rng() : 0]));
 
-  const chosen = [];
-  // Constraint levels, relaxed only when needed:
-  //   0: no shared top/dress   1: may share top, not top+bottom   2: anything not already chosen
+  const chosen = [];   // { c, tier }
+  // Constraint levels: 0 no shared top/dress · 1 may share top, not top+bottom · 2 any new look
   const allowed = (cand, level) => {
-    if (chosen.some(x => x.id === cand.id)) return false;
-    if (level === 0) return !chosen.some(x => x.primary.id === cand.primary.id);
-    if (level === 1) return !chosen.some(x => x.primary.id === cand.primary.id && x.bottom?.id === cand.bottom?.id);
+    if (chosen.some(x => x.c.id === cand.id)) return false;
+    if (level === 0) return !chosen.some(x => x.c.primary.id === cand.primary.id);
+    if (level === 1) return !chosen.some(x => x.c.primary.id === cand.primary.id && x.c.bottom?.id === cand.bottom?.id);
     return true;
   };
-  while (chosen.length < n) {
-    let pick = null;
-    for (let level = 0; level <= 2 && !pick; level++) {
-      let bestAdj = -Infinity;
-      for (const { c, key } of keyed) {
-        if (!allowed(c, level)) continue;
-        const maxSim = chosen.length ? Math.max(...chosen.map(x => similarity(c, x))) : 0;
-        const adj = key - DIVERSITY_LAMBDA * maxSim;
-        if (adj > bestAdj) { bestAdj = adj; pick = c; }
+  const pickFrom = (pool, level, allowRecent) => {
+    let pick = null, bestAdj = -Infinity;
+    for (const c of pool) {
+      if (!allowRecent && recent.has(c.id)) continue;
+      if (!allowed(c, level)) continue;
+      const maxSim = chosen.length ? Math.max(...chosen.map(x => similarity(c, x.c))) : 0;
+      const adj = c.total + noise.get(c.id) - DIVERSITY_LAMBDA * maxSim;
+      if (adj > bestAdj) { bestAdj = adj; pick = c; }
+    }
+    return pick;
+  };
+  const passes = [
+    { pool: tier1, level: 0, tier: 1 },
+    { pool: tier2, level: 0, tier: 2 },
+    { pool: tier2, level: 1, tier: 3 },
+    { pool: tier2, level: 2, tier: 3 },
+    { pool: fine,  level: 0, tier: 3 },
+    { pool: fine,  level: 2, tier: 3 },
+  ];
+  for (const allowRecent of [false, true]) {
+    for (const pass of passes) {
+      while (chosen.length < n) {
+        const pick = pickFrom(pass.pool, pass.level, allowRecent);
+        if (!pick) break;
+        chosen.push({ c: pick, tier: pass.tier });
       }
     }
-    if (!pick) break;
-    chosen.push(pick);
   }
-  return { chosen, allRecent: chosen.length > 0 && chosen.every(c => recent.has(c.id)) };
+  // Severe colour clashes: only when nothing else can be shown at all
+  if (chosen.length === 0) {
+    for (const level of [0, 2]) {
+      while (chosen.length < n) {
+        const pick = pickFrom(scored, level, true);
+        if (!pick) break;
+        chosen.push({ c: pick, tier: 4 });
+      }
+    }
+  }
+  const tiers = {};
+  chosen.forEach(x => { tiers[x.tier] = (tiers[x.tier] ?? 0) + 1; });
+  return {
+    chosen: chosen.map(x => ({ ...x.c, tier: x.tier })),
+    allRecent: chosen.length > 0 && chosen.every(x => recent.has(x.c.id)),
+    tiers,
+    poolSizes: { tier1: tier1.length, tier2: tier2.length, fine: fine.length, severe: scored.length - fine.length },
+  };
 }
 
 // ── main ────────────────────────────────────────────────────────
@@ -454,11 +530,13 @@ function evaluateAll(candidates, T, weather, occasion) {
       note(oc.fail, o, oc.fail === 'occ_type' ? oc.detail : `score ${oc.score.toFixed(2)}, formality ${oc.formality.toFixed(1)}`);
       continue;
     }
-    const color = outfitColorScore(o.parts.map(p => p.color), occasion);
+    const color = outfitColorScore(o.parts.map(p => p.colorRef), occasion);
     const style = styleConsistency(o);
-    const total = WEIGHTS.weather * w.score + WEIGHTS.occasion * oc.score + WEIGHTS.color * color.score + WEIGHTS.style * style;
+    const total = WEIGHTS.weather * w.score + WEIGHTS.occasion * oc.score + WEIGHTS.color * color.score + WEIGHTS.style * style
+      - (color.severe ? SEVERE_PENALTY : 0);
     passed.push({
       ...o,
+      severe: color.severe,
       total: round3(total),
       breakdown: {
         weather: round3(w.score), occasion: round3(oc.score), color: color.score, style: round3(style),
@@ -466,6 +544,12 @@ function evaluateAll(candidates, T, weather, occasion) {
         legWarmth: o.legWarmth, legReq: round3(Math.max(0, w.legReq)),
         formality: round3(oc.formality), colorLabel: color.label,
         untagged: o.parts.filter(p => !p.tagged).length,
+        colorSevere: color.severe,
+        colorPairs: color.pairs.map(pr => ({
+          a: o.parts[pr.i].colorName, b: o.parts[pr.j].colorName,
+          aHex: o.parts[pr.i].colorRef?.hex ?? null, bHex: o.parts[pr.j].colorRef?.hex ?? null,
+          score: pr.score, mode: pr.mode,
+        })),
       },
     });
   }
@@ -537,14 +621,27 @@ export function recommendOutfitsWithMeta(wardrobe, weather, occasion, options = 
     return { outfits: [], meta };
   }
 
-  const { chosen, allRecent } = selectLooks(passed, 3, seed, options.recentIds);
+  const { chosen, allRecent, tiers, poolSizes } = selectLooks(passed, 3, seed, options.recentIds);
   meta.repeated = seed > 0 && allRecent;
-  meta.counts.pool = passed.filter(c => c.total >= passed[0].total - POOL_MARGIN).length;
+  meta.tiers = tiers;
+  meta.counts.pool = poolSizes.tier1;
+  meta.counts.tier2 = poolSizes.tier2;
+  meta.counts.severe = poolSizes.severe;
+
+  // Fewer than 3: say why (shown next to the look count on Home)
+  if (chosen.length > 0 && chosen.length < 3) {
+    const n = chosen.length;
+    meta.shortReason = poolSizes.severe > 0 && poolSizes.fine < 3
+      ? `其他組合配色衝突，只列出 ${n} 套`
+      : `衣櫃中適合體感 ${Math.round(T)}°C ${OCC_LABEL[occ]} 的組合只有 ${n} 套`;
+  }
+  if (chosen.some(c => c.tier === 4)) meta.shortReason = '只找到配色較衝突的組合，建議補充中性色單品';
 
   const outfits = chosen.map(c => ({
     id: c.id,
     items: c.parts.map(p => p.item),
     score: Math.round(c.total * 100),
+    tier: c.tier,
     breakdown: c.breakdown,
   }));
   return { outfits, meta };

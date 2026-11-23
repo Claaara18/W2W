@@ -910,7 +910,7 @@ export default function HomeScreen() {
             <Text style={styles.sectionLabel}>02. TODAY'S EDIT</Text>
             <Text style={styles.editSub}>
               {recommendations.length > 0
-                ? `${recommendations.length} looks for you`
+                ? `${recommendations.length} looks for you${recommendations.length < 3 && showRecs && recMeta.shortReason ? ` · ${recMeta.shortReason}` : ''}`
                 : 'Three looks for you'}
             </Text>
           </View>
