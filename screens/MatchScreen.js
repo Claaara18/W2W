@@ -12,6 +12,7 @@ import * as Haptics from 'expo-haptics';
 import { useWardrobe } from '../context/WardrobeContext';
 import { useCollection } from '../context/CollectionContext';
 import { useCalendar } from '../context/CalendarContext';
+import { saveToDayLabel } from '../utils/calendarLabels';
 
 const BEIGE  = '#F2EDE8';
 const DARK   = '#1A1108';
@@ -230,7 +231,7 @@ function DatePickerModal({ visible, onClose, onSave, entries, canvasEmpty }) {
   const hasEntry = !!(selStr && entries?.[selStr]);
   const disabled = !selDay || canvasEmpty;
   const btnLabel = canvasEmpty ? '先在畫布加入衣服'
-                 : hasEntry    ? '取代這天的穿搭'
+                 : selDay      ? saveToDayLabel(year, month, selDay, hasEntry)
                  :               '儲存到這天';
 
   const handleSave = () => {

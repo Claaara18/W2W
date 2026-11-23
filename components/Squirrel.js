@@ -7,7 +7,9 @@ import * as Haptics from 'expo-haptics';
 // parent's coordinates). Imperative API via ref: goTo(name, opts), setPose(pose), celebrate(times),
 // enter(name), stop() (freeze in place), isAt(name).
 // Props: scale (uniform size around the feet, default 1), quiet (no idle wander hops or random
-// fast tail-wags; blink, breathing and sleep still run), bubbleSize (thinking-bubble diameter in
+// fast tail-wags; blink, breathing and sleep still run), idleWag (when idle long enough, wag the
+// tail for 2.4s every ~10s instead of falling asleep), tapPose (fixed pose for taps instead of
+// alternating happy / acorn), bubbleSize (thinking-bubble diameter in
 // the squirrel's own units; when set, the photo is cropped round to fill the bubble).
 // Built-in Animated only, native driver, opacity/transform only. Never intercepts touches.
 
@@ -21,6 +23,7 @@ const IMG = {
   happy_body: require('../assets/mascot/happy_body.png'),
   happy_spark:require('../assets/mascot/happy_spark.png'),
   acorn:      require('../assets/mascot/acorn.png'),
+  stamp_body: require('../assets/mascot/stamp_body.png'),
   sleep_body: require('../assets/mascot/sleep_body.png'),
   sleep_zzz:  require('../assets/mascot/sleep_zzz.png'),
 };
@@ -37,6 +40,7 @@ const POSE_BOX = {
   think: { width: 115, height: 113, left: -37 },
   acorn: { width: 108, height: 111, left: -41 },
   sleep: { width: 135, height: 88,  left: -60 },
+  stamp: { width: 115, height: 110, left: -64 },
 };
 const POSES = Object.keys(POSE_BOX);
 
@@ -135,7 +139,7 @@ function Layer({ source, style }) {
   );
 }
 
-function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, bubbleSize = null, style }, ref) {
+function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, idleWag = false, bubbleSize = null, tapPose = null, style }, ref) {
   const [pose, setPoseState] = useState('idle');
   const fades  = useRef(Object.fromEntries(POSES.map(p => [p, new Animated.Value(p === 'idle' ? 1 : 0)]))).current;
   const breath = useRef(new Animated.Value(0)).current;
@@ -167,7 +171,7 @@ function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, bubb
   const jumpH  = useRef(new Animated.Value(30)).current;
   const S = useRef({
     x: 0, y: 0, perch: null, token: 0, anim: null, motion: null, timers: [],
-    entered: false, sleepTimer: null, taps: 0,
+    entered: false, sleepTimer: null, idleWagTimer: null, taps: 0,
   }).current;
   const perchesRef = useRef(perches);
   const poseRef    = useRef('idle');
@@ -175,6 +179,8 @@ function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, bubb
   reduceRef.current = reduceMotion;
   const pausedRef  = useRef(paused);
   pausedRef.current = paused;
+  const idleWagRef = useRef(idleWag);
+  idleWagRef.current = idleWag;
   const [entered, setEntered] = useState(false);   // hit area only exists once it's on screen
   const [excited, setExcited] = useState(false);   // brief fast tail-wag while idle
 
@@ -264,7 +270,7 @@ function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, bubb
     jumpP.setValue(0);
   };
 
-  useEffect(() => () => { interrupt(); clearTimeout(S.sleepTimer); }, []);
+  useEffect(() => () => { interrupt(); clearSleep(); }, []);
 
   // Keep a resting squirrel glued to its perch when layout shifts
   useEffect(() => {
@@ -384,13 +390,25 @@ function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, bubb
 
   // Sleep countdown: one timer, re-armed only by real user activity (and on focus).
   // If it fires while busy (thinking, hopping, celebrating) it re-checks every second.
+  // With idleWag it never sleeps: a 2.4s fast wag, then the check again 8s later.
   const trySleep = () => {
     if (pausedRef.current) return;
-    if (canIdle()) { log('fell asleep'); setPose('sleep'); }
-    else S.sleepTimer = setTimeout(trySleep, 1000);
+    if (!canIdle()) { S.sleepTimer = setTimeout(trySleep, 1000); return; }
+    if (!idleWagRef.current) { log('fell asleep'); setPose('sleep'); return; }
+    log('idle wag');
+    setExcited(true);
+    S.idleWagTimer = setTimeout(() => {
+      S.idleWagTimer = null;
+      setExcited(false);
+      S.sleepTimer = setTimeout(trySleep, 8000);
+    }, 2400);
+  };
+  const clearSleep = () => {
+    clearTimeout(S.sleepTimer);
+    if (S.idleWagTimer) { clearTimeout(S.idleWagTimer); S.idleWagTimer = null; setExcited(false); }
   };
   const armSleep = (reason) => {
-    clearTimeout(S.sleepTimer);
+    clearSleep();
     log(`sleep timer reset (${SLEEP_AFTER / 1000}s) —`, reason);
     S.sleepTimer = setTimeout(trySleep, SLEEP_AFTER);
   };
@@ -406,7 +424,7 @@ function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, bubb
     const wasAsleep = poseRef.current === 'sleep';
     touch('tap squirrel');
     if (wasAsleep || !canIdle()) return;
-    const p = S.taps++ % 2 === 0 ? 'happy' : 'acorn';
+    const p = tapPose ?? (S.taps++ % 2 === 0 ? 'happy' : 'acorn');
     log('tapped →', p);
     celebrate(1, { pose: p });
   };
@@ -425,7 +443,7 @@ function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, bubb
   // Idle life while focused: wander / wag every 2.4–4.8s (skipped when quiet), plus the sleep
   // countdown. Leaving the tab clears both; coming back starts them again.
   useEffect(() => {
-    if (paused) { log('paused (tab out of focus)'); clearTimeout(S.sleepTimer); return; }
+    if (paused) { log('paused (tab out of focus)'); clearSleep(); return; }
     armSleep('focused');
     let tickTimer, wagTimer;
     const tick = () => {
@@ -445,7 +463,7 @@ function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, bubb
     return () => {
       clearTimeout(tickTimer);
       clearTimeout(wagTimer);
-      clearTimeout(S.sleepTimer);
+      clearSleep();
       setExcited(false);
     };
   }, [paused, quiet]);
@@ -511,6 +529,7 @@ function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, bubb
       if (pose === 'think') { run(pingPong(sway, 750));    run(cycle(qmark, 1000, Easing.inOut(Easing.sin))); }
       if (pose === 'happy') { run(pingPong(tail, 260));    run(pingPong(spark, 500)); }
       if (pose === 'acorn') { run(pingPong(breath, 1100)); }
+      if (pose === 'stamp') { run(pingPong(breath, 1400)); }
       if (pose === 'sleep') { run(pingPong(breath, 1800)); run(cycle(zzz, 2800, Easing.inOut(Easing.sin))); }
     }
 
@@ -613,6 +632,11 @@ function Squirrel({ perches = {}, paused = false, scale = 1, quiet = false, bubb
           {/* acorn: hugging an acorn, 2.2s breathing */}
           <Animated.View style={poseStyle('acorn', breathe(1.012, 1.022))}>
             <Layer source={IMG.acorn} />
+          </Animated.View>
+
+          {/* stamp: holding the stamp, gentle breathing */}
+          <Animated.View style={poseStyle('stamp', breathe(1.01, 1.02))}>
+            <Layer source={IMG.stamp_body} />
           </Animated.View>
 
           {/* sleep: slow breathing, zzz drifts up-right and fades (2.8s) */}

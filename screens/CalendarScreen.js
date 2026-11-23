@@ -366,13 +366,13 @@ export default function CalendarScreen() {
     };
     sq.touch('stamp');
     if (!(await sq.goTo('today', { ms: 220 }))) return finish();
-    sq.setPose('acorn');
+    sq.setPose('stamp');
     await new Promise(res => Animated.parallel([
       Animated.timing(stampV, { toValue: 1, duration: 420, easing: Easing.bezier(0.3, 1.25, 0.5, 1), useNativeDriver: true }),
       Animated.timing(ringV,  { toValue: 1, duration: 650, delay: 260, easing: Easing.out(Easing.quad), useNativeDriver: true }),
     ]).start(res));
     if (!mounted.current) return finish();
-    await sq.celebrate(2, { confetti: true });
+    await sq.celebrate(1, { pose: 'stamp', confetti: true });
     await sq.goTo('card');
     finish();
   };
@@ -550,7 +550,7 @@ export default function CalendarScreen() {
         )}
 
         {/* Mascot — lives in the scroll content so it scrolls with the page; only its body takes taps */}
-        <Squirrel ref={sqRef} perches={perches} paused={!isFocused} scale={0.7} quiet />
+        <Squirrel ref={sqRef} perches={perches} paused={!isFocused} scale={0.7} quiet idleWag tapPose="stamp" />
       </ScrollView>
     </SafeAreaView>
   );
