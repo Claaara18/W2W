@@ -250,21 +250,6 @@ export default function ClosetScreen() {
   const isFocused  = useIsFocused();
   const failedRef  = useRef([]);   // shown after the overlay has faded out
 
-  // Header squirrel: quiet, between the title and the heart, feet just above the divider
-  const headSqRef = useRef(null);
-  const headLay   = useRef({}).current;   // header, heart
-  const [headPerches, setHeadPerches] = useState({});
-  const onHeadLay = (key) => (e) => {
-    headLay[key] = e.nativeEvent.layout;
-    if (!headLay.header || !headLay.heart) return;
-    const p = { title: { x: headLay.heart.x - 42, y: headLay.header.height - 2 } };
-    setHeadPerches(prev => (JSON.stringify(prev) === JSON.stringify(p) ? prev : p));
-  };
-  useEffect(() => {
-    if (view !== 'list' || showCollection || !headPerches.title) return;
-    appearInPlace(headSqRef.current, 'title', () => setHeadPerches(p => ({ ...p })));
-  }, [view, showCollection, !!headPerches.title]);
-
   // Modals
   const [editModal, setEditModal] = useState(false);   // edit item
   const [editItem, setEditItem]   = useState(null);    // { ...item, catId }
@@ -420,19 +405,17 @@ export default function ClosetScreen() {
   // ── ─────────────────────────────────────────────────────────
   if (view === 'list') {
     return (
-      <SafeAreaView style={styles.safe} edges={['top']} onTouchStart={() => headSqRef.current?.touch('tap')}>
+      <SafeAreaView style={styles.safe} edges={['top']}>
         {/* Header */}
-        <View style={styles.listHeader} onLayout={onHeadLay('header')}>
+        <View style={styles.listHeader}>
           <Text style={styles.pageTitle}>Closet</Text>
           <TouchableOpacity
             onPress={() => setShowCollection(true)}
             hitSlop={12}
             style={styles.collectionBtn}
-            onLayout={onHeadLay('heart')}
           >
             <Ionicons name="heart" size={26} color="#A99A8A" />
           </TouchableOpacity>
-          <Squirrel ref={headSqRef} perches={headPerches} paused={!isFocused} scale={0.6} quiet />
         </View>
         <View style={styles.divider} />
 

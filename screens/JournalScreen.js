@@ -11,6 +11,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { captureRef } from 'react-native-view-shot';
 // SDK 57: root entry is the new class-based API (no web impl, saveToLibraryAsync throws); use legacy
 import * as MediaLibrary from 'expo-media-library/legacy';
+import * as Sharing from 'expo-sharing';
 import * as ImagePicker from 'expo-image-picker';
 import { STICKER_CATS, STICKER_SOURCES } from '../data/stickers';
 
@@ -1037,17 +1038,23 @@ export default function JournalScreen({ visible, onClose, viewYear, viewMonth, e
     setAdjustingItem(null);
   };
 
+  // Deselect, scroll to top and let the canvas settle before grabbing it as a PNG
+  const captureCanvas = async () => {
+    setSelectedId(null);
+    scrollRef.current?.scrollTo({ y:0, animated:false });
+    await new Promise(r => setTimeout(r,150));
+    return captureRef(canvasRef, { format:'png', quality:1.0 });
+  };
+
   const handleSave = async () => {
     if (Platform.OS === 'web') {
       // Alert.alert is a no-op on react-native-web
       window.alert('Web 版不支援儲存至相簿，請在 iOS App 使用此功能');
       return;
     }
-    setSelectedId(null); setCapturing(true);
-    scrollRef.current?.scrollTo({ y:0, animated:false });
-    await new Promise(r => setTimeout(r,150));
+    setCapturing(true);
     try {
-      const uri = await captureRef(canvasRef, { format:'png', quality:1.0 });
+      const uri = await captureCanvas();
       const { status } = await MediaLibrary.requestPermissionsAsync();
       if (status!=='granted') {
         Alert.alert('需要相簿權限','請到 設定 → W2W → 相片 開啟存取權限'); return;
@@ -1058,6 +1065,26 @@ export default function JournalScreen({ visible, onClose, viewYear, viewMonth, e
       console.warn('Journal capture error:',e);
       Alert.alert('儲存失敗','請再試一次');
     } finally { setCapturing(false); }
+  };
+
+  const handleShare = async () => {
+    if (!(await Sharing.isAvailableAsync())) {
+      Alert.alert('無法分享','此裝置不支援分享功能'); return;
+    }
+    let uri;
+    setCapturing(true);
+    try {
+      uri = await captureCanvas();
+    } catch (e) {
+      console.warn('Journal capture error:',e);
+      Alert.alert('分享失敗','請再試一次'); return;
+    } finally { setCapturing(false); }
+    try {
+      await Sharing.shareAsync(uri, { mimeType:'image/png', UTI:'public.png', dialogTitle:'分享我的穿搭日記' });
+    } catch (e) {
+      // dismissing the share sheet can reject on some platforms; not an error for the user
+      console.warn('Journal share dismissed/failed:',e);
+    }
   };
 
   const currentCat  = STICKER_CATS.find(c => c.id===selectedCat) ?? STICKER_CATS[0];
@@ -1080,6 +1107,9 @@ export default function JournalScreen({ visible, onClose, viewYear, viewMonth, e
             </TouchableOpacity>
             <TouchableOpacity onPress={() => openTextEditor('new')} hitSlop={10} style={js.toolIconBtn}>
               <Ionicons name="text-outline" size={20} color={MUTED} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={handleShare} hitSlop={10} style={js.toolIconBtn}>
+              <Ionicons name="share-outline" size={21} color={MUTED} />
             </TouchableOpacity>
             <TouchableOpacity onPress={handleSave} hitSlop={10} style={js.toolIconBtn}>
               <Ionicons name="arrow-down-circle-outline" size={22} color={DARK} />

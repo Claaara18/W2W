@@ -11,6 +11,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useWardrobe } from '../context/WardrobeContext';
 import { useCollection } from '../context/CollectionContext';
 import { useCalendar } from '../context/CalendarContext';
+import { saveToDayLabel } from '../utils/calendarLabels';
 import { recommendOutfitsWithMeta, isSameOutfit } from '../utils/outfitRecommender';
 import { useIsFocused } from '@react-navigation/native';
 import Squirrel from '../components/Squirrel';
@@ -32,6 +33,15 @@ const SERIF       = Platform.OS === 'ios' ? 'Georgia' : 'serif';
 const MONO        = 'JetBrainsMono_400Regular';
 
 const OCCASIONS = ['Casual', 'School', 'Work', 'Date'];
+
+// What the squirrel says after saving a look to today (half the time occasion-specific)
+const SAVE_LINES = ['今天也穿得很好','這套很有你的味道','記下來了！','好看，收進日記囉','今天的你很可以','這套我給滿分','又多一頁回憶了','穿得剛剛好'];
+const SAVE_LINES_BY_OCC = {
+  Casual: ['輕鬆又好看','今天走舒服路線'],
+  School: ['上課也要漂漂亮亮','今天也認真上學'],
+  Work:   ['專業感滿分','今天氣場很穩'],
+  Date:   ['約會加油！','今天一定很順利'],
+};
 
 const CATEGORY_LABELS = {
   tshirts: 'Top', jackets: 'Jacket', skirts: 'Skirt', pants: 'Pants', dresses: 'Dress',
@@ -488,7 +498,7 @@ function CalendarPickerModal({ visible, onClose, onSave, entries }) {
               </View>
               <TouchableOpacity style={[cpStyles.saveBtn, !selDay && { opacity: 0.35 }]}
                 onPress={handleSave} disabled={!selDay}>
-                <Text style={cpStyles.saveTxt}>{hasEntry ? '取代這天的穿搭' : '儲存到這天'}</Text>
+                <Text style={cpStyles.saveTxt}>{selDay ? saveToDayLabel(year, month, selDay, hasEntry) : '儲存到這天'}</Text>
               </TouchableOpacity>
             </View>
           </TouchableWithoutFeedback>
@@ -547,6 +557,18 @@ export default function HomeScreen() {
   const isFocused = useIsFocused();
   const lay       = useRef({}).current;   // header, title, edit, editHead
   const [perches, setPerches] = useState({});
+  const lastSaveLine = useRef(null);
+
+  // Random save line, never the same one twice in a row
+  const pickSaveLine = (occ) => {
+    let line;
+    do {
+      const pool = Math.random() < 0.5 && SAVE_LINES_BY_OCC[occ] ? SAVE_LINES_BY_OCC[occ] : SAVE_LINES;
+      line = pool[Math.floor(Math.random() * pool.length)];
+    } while (line === lastSaveLine.current);
+    lastSaveLine.current = line;
+    return line;
+  };
 
   const recomputePerches = () => {
     const p = {};
@@ -735,7 +757,7 @@ export default function HomeScreen() {
     const t = new Date();
     const todayStr = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
     const [, m, d] = dateStr.split('-').map(Number);
-    sqRef.current?.say(dateStr === todayStr ? '今天也穿得很好' : `已存到 ${m}/${d} 的日記`);
+    sqRef.current?.say(dateStr === todayStr ? pickSaveLine(selectedOcc) : `已存到 ${m}/${d} 的日記`);
   };
 
   const saveOutfitToCalendar = (dateStr) => {
